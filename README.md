@@ -59,33 +59,6 @@ writes each run to `logs\resume-*.log`.
   in-progress resume jobs. Only jobs *this tool* started are touched — your real
   interactive Claude Code sessions are never killed.
 
-## CLI-only variant
-
-`claude-watch.ps1` is a no-GUI version that watches a **single** project from the
-command line. It is a simple blocking loop — it occupies the terminal until the
-cap lifts (or you press **Ctrl+C**).
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\claude-watch.ps1 -Project G:\myproject -PollMinutes 30
-```
-
-Parameters: `-Project` (defaults to the current directory), `-Prompt` (the wake
-instruction), `-Session` (a specific session id; defaults to the newest for the
-project), `-PollMinutes` (default 10).
-
-Two differences from the GUI to be aware of:
-
-- **It assumes you are already capped.** Unlike the GUI, it has no "not currently
-  rate-limited" guard — if you start it when you are *not* capped, the first
-  probe succeeds and it resumes immediately. Only run it after you have hit the
-  cap.
-- **Always pass `-Project`.** If the given project has no session log, it falls
-  back to the newest session found *anywhere*, which could resume a different
-  project. Passing `-Project` (and optionally `-Session`) avoids that.
-
-For everyday use prefer the GUI — it has the not-capped guard, multi-project
-support, and never blocks a terminal.
-
 ## Caveats
 
 - **Autonomous resume.** The resume runs one long headless turn with no human in
@@ -94,7 +67,7 @@ support, and never blocks a terminal.
   not help.
 - **Rate-limit wording.** Cap detection matches `usage limit / rate limit /
   resets at / 429`. If Claude's live message uses different wording, adjust the
-  pattern in `Read-ProbeResult` (UI) / `Test-CapLifted` (CLI).
+  pattern in `Read-ProbeResult`.
 
 ## Troubleshooting
 
@@ -117,6 +90,5 @@ support, and never blocks a terminal.
 |------|---------|
 | `claude-watch-ui.ps1` | WinForms GUI (main tool) |
 | `Claude Watch.cmd` | Double-click launcher for the GUI |
-| `claude-watch.ps1` | CLI-only single-project watcher |
 | `projects.txt` | Your saved list of watched project paths (git-ignored) |
 | `logs/` | Resume run output (git-ignored) |

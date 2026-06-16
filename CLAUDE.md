@@ -37,7 +37,6 @@ must never interfere with the user's real interactive Claude Code sessions.
 |------|---------|
 | `claude-watch-ui.ps1` | WinForms GUI — the main tool |
 | `Claude Watch.cmd` | Double-click launcher (`%~dp0`-relative; rename-safe) |
-| `claude-watch.ps1` | CLI-only single-project watcher |
 | `CLAUDE.md` / `README.md` | Docs |
 | `logs/` | Resume run output — git-ignored, may contain session content |
 
@@ -64,29 +63,14 @@ probing -> ... -> resuming -> idle`.
   Stop button and `FormClosing`. **Never kill `claude` by process name** — that
   would kill the user's real Claude Code sessions.
 
-## CLI variant (`claude-watch.ps1`)
-
-A standalone single-project watcher, intentionally simpler than the GUI. Known
-differences (documented in the README, not bugs to "fix" silently):
-
-- It is a **blocking `Start-Sleep` loop** (Ctrl+C to stop), not async.
-- It has **no not-capped guard** — starting it while not capped resumes
-  immediately. The GUI's `SawCap` guard is the safe path; the CLI assumes you are
-  already capped.
-- If `-Project` has no session log it falls back to the **newest session
-  anywhere**, which can resume a different project. Always pass `-Project`.
-
-If asked to make the CLI safer, port the `SawCap` transition guard and drop the
-newest-anywhere fallback (or make it opt-in).
-
 ## Conventions / gotchas
 
 - Pure Windows PowerShell 5.1 + WinForms. **No external modules** (toasts use the
   native `Windows.UI.Notifications` WinRT API with a NotifyIcon fallback).
 - Paths derive from `$PSScriptRoot`, not hardcoded — keep it that way so the
   folder can be renamed/moved freely.
-- Cap-detection wording lives in `Read-ProbeResult` (GUI) and `Test-CapLifted`
-  (CLI): `usage limit | rate limit | resets at | 429`. The exact live
+- Cap-detection wording lives in `Read-ProbeResult`:
+  `usage limit | rate limit | resets at | 429`. The exact live
   rate-limit text is unverified; if it differs, this regex is the one knob to
   tune.
 - After editing, syntax-check with
