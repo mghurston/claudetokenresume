@@ -46,9 +46,15 @@ must never interfere with the user's real interactive Claude Code sessions.
 State machine driven by one timer. Phases: `idle -> probing -> waiting ->
 probing -> ... -> resuming -> idle`.
 
-- `Get-Projects` — reads `%USERPROFILE%\.claude\projects\*\*.jsonl`, parses the
-  real `cwd` out of each newest log, filters drive roots / `Windows\System32`.
-  Session id = jsonl filename (used with `claude --resume <id>`).
+- **Explicit project list, NOT auto-discovery.** The user adds project folders
+  via the Add button; paths persist to `projects.txt` (git-ignored). An earlier
+  version auto-listed every folder under `%USERPROFILE%\.claude\projects`, which
+  surfaced every cwd Claude had ever run from (`C:\Windows\System32`, drive
+  roots, `Documents`, etc.) — privacy noise. **Do not bring auto-discovery
+  back.** `Get-ConfigPaths`/`Save-Config` manage the list; `Resolve-Project`
+  maps each path to its newest session id (jsonl filename, used with
+  `claude --resume <id>`) and reports "(no Claude session yet)" if none, which
+  the start guard blocks.
 - `Start-Probe` / `Read-ProbeResult` — async probe + classifier returning
   `capped` / `lifted` / `unknown`.
 - `Start-Resumes` — launches one background job per ticked project running

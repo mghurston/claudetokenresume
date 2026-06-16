@@ -40,12 +40,15 @@ powershell -ExecutionPolicy Bypass -File .\claude-watch-ui.ps1
 
 Then:
 
-1. Tick the project(s) to auto-continue. The list is read live from your local
-   session logs (`%USERPROFILE%\.claude\projects`), showing real paths and last
-   activity.
-2. Set **Check every (min)** (default 30).
-3. Edit the **wake prompt** if you want.
-4. Click **Start watching**.
+1. Click **Add project...** and pick each Claude project folder you want to
+   watch. Your list is saved to `projects.txt` (git-ignored) and persists
+   between runs. **Remove** drops the highlighted row. The tool does **not**
+   auto-discover projects — only folders you add ever appear.
+2. Tick the project(s) to auto-continue. Each row shows the newest session and
+   last activity (or "no Claude session yet" if Claude has never run there).
+3. Set **Check every (min)** (default 30).
+4. Edit the **wake prompt** if you want.
+5. Click **Start watching**.
 
 On reset it resumes each ticked project as a background job, toasts you, and
 writes each run to `logs\resume-*.log`.
@@ -82,4 +85,5 @@ powershell -ExecutionPolicy Bypass -File .\claude-watch.ps1 -Project G:\myprojec
 | `claude-watch-ui.ps1` | WinForms GUI (main tool) |
 | `Claude Watch.cmd` | Double-click launcher for the GUI |
 | `claude-watch.ps1` | CLI-only single-project watcher |
+| `projects.txt` | Your saved list of watched project paths (git-ignored) |
 | `logs/` | Resume run output (git-ignored) |

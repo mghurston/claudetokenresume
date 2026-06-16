@@ -1,2 +1,5 @@
 # Resume run output — may contain project details / session content
 logs/
+
+# Your personal list of watched project paths
+projects.txt

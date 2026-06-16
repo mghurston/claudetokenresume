@@ -17,33 +17,55 @@ $projectsRoot = Join-Path $env:USERPROFILE ".claude\projects"
 $logDir = Join-Path $PSScriptRoot "logs"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 
+# Your explicit list of project folders (one per line). NOT auto-discovered.
+$configPath = Join-Path $PSScriptRoot "projects.txt"
+
 $defaultPrompt = "The usage limit has reset. Continue exactly where you left off. Re-read the last few messages for context, then keep going until the task is done. If anything is ambiguous, make the most reasonable choice and note it."
 
-# --- Discover projects from the local session logs --------------------------
-function Get-Projects {
-    $items = @()
-    if (-not (Test-Path $projectsRoot)) { return $items }
-    foreach ($dir in Get-ChildItem $projectsRoot -Directory) {
-        $j = Get-ChildItem $dir.FullName -Filter *.jsonl -ErrorAction SilentlyContinue |
-             Sort-Object LastWriteTime -Descending | Select-Object -First 1
-        if (-not $j) { continue }
-        # Real cwd lives inside the log; fall back to the flattened folder name.
-        $cwd = $null
-        foreach ($line in (Get-Content $j.FullName -TotalCount 40 -ErrorAction SilentlyContinue)) {
-            if ($line -match '"cwd"\s*:\s*"([^"]+)"') { $cwd = ($Matches[1] -replace '\\\\','\'); break }
-        }
-        if (-not $cwd) { $cwd = $dir.Name }
-        # Skip non-project noise (drive roots, system dirs).
-        $norm = $cwd.TrimEnd('\','/')
-        if ($norm -in @('G:','C:','D:') -or $norm -match '(?i)\\Windows\\System32$') { continue }
-        $items += [PSCustomObject]@{
-            Path    = $cwd
-            Session = $j.BaseName
-            Last    = $j.LastWriteTime
-            Display = ("{0,-40}  last: {1:MM/dd HH:mm}" -f $cwd, $j.LastWriteTime)
+# --- Explicit project list (you add the paths; nothing is auto-discovered) ---
+function Get-ConfigPaths {
+    if (Test-Path $configPath) {
+        return @(Get-Content $configPath -ErrorAction SilentlyContinue | Where-Object { $_.Trim() -ne '' })
+    }
+    return @()
+}
+
+function Save-Config($paths) {
+    @($paths | ForEach-Object { $_.TrimEnd('\','/') } | Sort-Object -Unique) |
+        Set-Content -LiteralPath $configPath -Encoding UTF8
+}
+
+# For an explicit project path, find its newest Claude session id (needed for
+# --resume). Session is $null if Claude has never run in that folder.
+function Resolve-Project([string]$path) {
+    $norm = $path.TrimEnd('\','/')
+    $flat = $norm -replace '[:\\/]', '-'
+    $folder = Join-Path $projectsRoot $flat
+    if (-not (Test-Path $folder)) {
+        # Fall back to matching the cwd recorded inside each log.
+        $folder = $null
+        foreach ($d in (Get-ChildItem $projectsRoot -Directory -ErrorAction SilentlyContinue)) {
+            $jj = Get-ChildItem $d.FullName -Filter *.jsonl -ErrorAction SilentlyContinue |
+                  Sort-Object LastWriteTime -Descending | Select-Object -First 1
+            if (-not $jj) { continue }
+            foreach ($line in (Get-Content $jj.FullName -TotalCount 40 -ErrorAction SilentlyContinue)) {
+                if ($line -match '"cwd"\s*:\s*"([^"]+)"') {
+                    if ((($Matches[1] -replace '\\\\','\').TrimEnd('\','/')) -ieq $norm) { $folder = $d.FullName }
+                    break
+                }
+            }
+            if ($folder) { break }
         }
     }
-    $items | Sort-Object Last -Descending
+    $session = $null; $last = $null
+    if ($folder) {
+        $j = Get-ChildItem $folder -Filter *.jsonl -ErrorAction SilentlyContinue |
+             Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        if ($j) { $session = $j.BaseName; $last = $j.LastWriteTime }
+    }
+    $disp = if ($session) { "{0,-42}  last: {1:MM/dd HH:mm}" -f $norm, $last }
+            else          { "{0,-42}  (no Claude session yet)" -f $norm }
+    [PSCustomObject]@{ Path = $norm; Session = $session; Last = $last; Display = $disp }
 }
 
 # --- Native toast (no modules) ---------------------------------------------
@@ -69,7 +91,7 @@ $form.StartPosition = "CenterScreen"
 $form.Font = New-Object System.Drawing.Font("Segoe UI", 9)
 
 $lbl = New-Object System.Windows.Forms.Label
-$lbl.Text = "Select the project(s) to auto-continue when the usage window resets:"
+$lbl.Text = "Tick the project(s) to auto-continue when the usage window resets:"
 $lbl.Location = '15,12'; $lbl.AutoSize = $true
 $form.Controls.Add($lbl)
 
@@ -78,8 +100,16 @@ $clb.Location = '15,38'; $clb.Size = '595,210'
 $clb.CheckOnClick = $true; $clb.DisplayMember = 'Display'; $clb.Font = New-Object System.Drawing.Font("Consolas", 9)
 $form.Controls.Add($clb)
 
+$btnAdd = New-Object System.Windows.Forms.Button
+$btnAdd.Text = "Add project..."; $btnAdd.Location = '15,254'; $btnAdd.Size = '110,26'
+$form.Controls.Add($btnAdd)
+
+$btnRemove = New-Object System.Windows.Forms.Button
+$btnRemove.Text = "Remove"; $btnRemove.Location = '131,254'; $btnRemove.Size = '90,26'
+$form.Controls.Add($btnRemove)
+
 $btnRefresh = New-Object System.Windows.Forms.Button
-$btnRefresh.Text = "Refresh"; $btnRefresh.Location = '15,254'; $btnRefresh.Size = '90,26'
+$btnRefresh.Text = "Refresh"; $btnRefresh.Location = '227,254'; $btnRefresh.Size = '90,26'
 $form.Controls.Add($btnRefresh)
 
 $lblInt = New-Object System.Windows.Forms.Label
@@ -121,8 +151,8 @@ function Write-Log([string]$msg) {
 
 function Load-List {
     $clb.Items.Clear()
-    foreach ($p in Get-Projects) { [void]$clb.Items.Add($p) }
-    Write-Log "Loaded $($clb.Items.Count) project(s)."
+    foreach ($p in Get-ConfigPaths) { [void]$clb.Items.Add((Resolve-Project $p)) }
+    Write-Log "Loaded $($clb.Items.Count) project(s) from $([System.IO.Path]::GetFileName($configPath))."
 }
 
 # --- State machine (all async so the window never freezes) ------------------
@@ -155,7 +185,8 @@ function Stop-Watch([string]$status) {
     $timer.Stop(); $script:Watching = $false; $script:Phase = 'idle'
     Clear-Jobs
     $btnStart.Text = "Start watching"; $btnStart.BackColor = [System.Drawing.Color]::FromArgb(46,160,67)
-    $clb.Enabled = $true; $num.Enabled = $true; $txtPrompt.Enabled = $true; $btnRefresh.Enabled = $true
+    $clb.Enabled = $true; $num.Enabled = $true; $txtPrompt.Enabled = $true
+    $btnRefresh.Enabled = $true; $btnAdd.Enabled = $true; $btnRemove.Enabled = $true
     $lblStatus.Text = $status
 }
 
@@ -274,14 +305,42 @@ $btnStart.Add_Click({
     }
     if (-not $claude) { [System.Windows.Forms.MessageBox]::Show("claude CLI not found on PATH."); return }
     if (@($clb.CheckedItems).Count -eq 0) { [System.Windows.Forms.MessageBox]::Show("Tick at least one project."); return }
+    $noSession = @($clb.CheckedItems | Where-Object { -not $_.Session })
+    if ($noSession.Count -gt 0) {
+        [System.Windows.Forms.MessageBox]::Show(
+            "These ticked folders have no Claude session yet, so there's nothing to resume:`n`n" +
+            (($noSession | ForEach-Object { $_.Path }) -join "`n") +
+            "`n`nRun 'claude' in them once, then Refresh.", "No session", 'OK', 'Warning') | Out-Null
+        return
+    }
 
     $script:Watching = $true
     $script:SawCap   = $false
     $btnStart.Text = "Stop"; $btnStart.BackColor = [System.Drawing.Color]::FromArgb(207,34,46)
-    $clb.Enabled = $false; $num.Enabled = $false; $txtPrompt.Enabled = $false; $btnRefresh.Enabled = $false
+    $clb.Enabled = $false; $num.Enabled = $false; $txtPrompt.Enabled = $false
+    $btnRefresh.Enabled = $false; $btnAdd.Enabled = $false; $btnRemove.Enabled = $false
     Write-Log "Watching $(@($clb.CheckedItems).Count) project(s), checking every $($num.Value) min."
     # First probe confirms you are actually capped. If not, it tells you and stops.
     Start-Probe
+})
+
+$btnAdd.Add_Click({
+    $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
+    $dlg.Description = "Select a Claude project folder to watch"
+    $dlg.ShowNewFolderButton = $false
+    if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+        Save-Config (@(Get-ConfigPaths) + $dlg.SelectedPath)
+        Load-List
+        Write-Log "Added: $($dlg.SelectedPath)"
+    }
+})
+
+$btnRemove.Add_Click({
+    $sel = $clb.SelectedItem
+    if (-not $sel) { [System.Windows.Forms.MessageBox]::Show("Click a project row (to highlight it), then Remove."); return }
+    Save-Config (@(Get-ConfigPaths) | Where-Object { $_.TrimEnd('\','/') -ine $sel.Path })
+    Load-List
+    Write-Log "Removed: $($sel.Path)"
 })
 
 $btnRefresh.Add_Click({ Load-List })
