@@ -16,20 +16,33 @@ must never interfere with the user's real interactive Claude Code sessions.
 
 ## How it works (the important mental model)
 
-- **No token estimation.** Plan-limit token math is unreliable. Instead the tool
-  *probes*: a rate-limited `claude -p` call fails instantly and **costs no
-  tokens**, so it retries on an interval until one succeeds. That success is the
-  signal the window reset.
-- **Account-wide cap.** A single probe covers every selected project.
+- **Read the limit, don't parse text.** Detection makes a minimal
+  `POST /v1/messages` (max_tokens 1) using the OAuth token Claude Code stores in
+  `~/.claude/.credentials.json`, then reads the **unified rate-limit response
+  headers** — the same data behind the Claude app's Usage panel:
+  `anthropic-ratelimit-unified-5h-status` (`allowed` vs capped) and
+  `anthropic-ratelimit-unified-5h-reset` (exact reset, unix secs). While capped
+  the call returns **HTTP 429 and costs nothing**, but the reset header is still
+  present — so the tool learns *precisely* when to resume. An earlier design
+  shelled `claude -p` and regex-matched its stdout for "usage limit" wording;
+  that silently broke because the live text said "session limit / resets
+  12:40pm". **Do not go back to text-parsing.**
+- **Account-wide cap.** A single check covers every selected project.
+- **Do NOT write to `.credentials.json`.** We only *read* the token. Claude
+  Code's refresh tokens rotate, so refreshing + writing back could invalidate
+  the user's login. For long waits the tool instead records the reset epoch from
+  the first valid check and falls back to **time-based waiting** if the token
+  later expires (401 -> `unknown`); the resume itself runs through the `claude`
+  CLI, which manages its own auth.
 - **Resume only on a real capped -> lifted transition.** `$script:SawCap` must
-  become true (an observed capped probe) before any resume can fire. If the
-  first probe shows "not capped", the tool tells the user there's nothing to
+  become true (an observed capped check) before any resume can fire. If the
+  first check shows "not capped", the tool tells the user there's nothing to
   wait for and stops. **Do not regress this** — an early version resumed
   immediately when started while not capped, which was the worst bug.
-- **Everything is async.** Probe and resume run as PowerShell background jobs
-  polled by a `System.Windows.Forms.Timer`. Nothing blocks the UI thread. Do not
-  reintroduce synchronous `& claude ...` calls on the UI thread — that froze the
-  window so it couldn't be closed.
+- **Everything is async.** The limit check and resume run as PowerShell
+  background jobs polled by a `System.Windows.Forms.Timer`. Nothing blocks the UI
+  thread. Do not put synchronous `Invoke-WebRequest`/`& claude ...` calls on the
+  UI thread — that froze the window so it couldn't be closed.
 
 ## Files
 
@@ -54,8 +67,11 @@ probing -> ... -> resuming -> idle`.
   maps each path to its newest session id (jsonl filename, used with
   `claude --resume <id>`) and reports "(no Claude session yet)" if none, which
   the start guard blocks.
-- `Start-Probe` / `Read-ProbeResult` — async probe + classifier returning
-  `capped` / `lifted` / `unknown`.
+- `Start-Probe` — async limit check. Background job reads the OAuth token, calls
+  `/v1/messages`, and emits one-line JSON `{ status; reset; http; detail }` where
+  `status` is `capped` / `lifted` / `unknown`. `Invoke-Tick`'s `probing` branch
+  parses it and (when capped) waits until `reset` (+30s), re-polling at most
+  every `num` minutes.
 - `Start-Resumes` — launches one background job per ticked project running
   `claude -p --resume <session> <prompt>`, output to `logs\resume-*.log`.
 - `Invoke-Tick` — the state machine body.
@@ -69,10 +85,15 @@ probing -> ... -> resuming -> idle`.
   native `Windows.UI.Notifications` WinRT API with a NotifyIcon fallback).
 - Paths derive from `$PSScriptRoot`, not hardcoded — keep it that way so the
   folder can be renamed/moved freely.
-- Cap-detection wording lives in `Read-ProbeResult`:
-  `usage limit | rate limit | resets at | 429`. The exact live
-  rate-limit text is unverified; if it differs, this regex is the one knob to
-  tune.
+- Cap detection depends on the header names
+  `anthropic-ratelimit-unified-5h-status` / `-5h-reset` (and the `-status` /
+  `-reset` fallbacks) returned by `POST /v1/messages` for OAuth/subscription
+  users. Verified 2026-06-16: `5h-status: allowed|...`, `5h-reset: <unix secs>`,
+  plus `-5h-utilization` and `-7d-*` (weekly) that mirror the Usage panel. The
+  OAuth call needs the `anthropic-beta: oauth-2025-04-20` header. If Anthropic
+  renames these headers, that is the knob to tune.
+- The OAuth token is at `~/.claude/.credentials.json` under
+  `claudeAiOauth.accessToken`. Read-only — see "Do not write to .credentials.json".
 - After editing, syntax-check with
   `[System.Management.Automation.Language.Parser]::ParseFile(...)` before
   claiming it works. Do not launch the GUI non-interactively — `ShowDialog()`

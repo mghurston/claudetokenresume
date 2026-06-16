@@ -4,9 +4,10 @@ A small Windows tool that waits out the Claude Code **usage-limit cooldown** and
 then **auto-continues** your work headlessly, with a desktop toast + sound when
 it starts and finishes.
 
-You start it *after* you hit the cap in a session. It cheaply checks whether the
-rolling usage window has reset, and the moment it has, it resumes the most recent
-session of each project you selected by running:
+You start it *after* you hit the cap in a session. It reads your **exact reset
+time** from Anthropic's rate-limit data, waits until then, and the moment the
+window resets it resumes the most recent session of each project you selected by
+running:
 
 ```
 claude -p --resume <session-id> "<your wake prompt>"
@@ -14,12 +15,20 @@ claude -p --resume <session-id> "<your wake prompt>"
 
 ## Why it works this way
 
-- **No token estimation.** Token-count guesses against plan limits are
-  unreliable. Instead the tool *probes*: a rate-limited `claude` call fails
-  instantly and **costs no tokens**, so it can retry every N minutes until one
-  succeeds. That success is the reliable signal the window reset.
-- **Account-wide cap.** One probe covers every selected project, so watching 4
+- **Reads the real limit, doesn't guess.** The tool makes a tiny
+  `/v1/messages` call with the OAuth token Claude Code already stores, and reads
+  the **unified rate-limit headers** — the same data behind the Claude app's
+  Usage panel (`Settings → Usage`). That tells it, precisely, whether you're
+  capped and the exact time the 5-hour window resets. While you're capped the
+  call is rejected (HTTP 429) and **costs nothing**, but it still reports the
+  reset time — so the tool knows exactly when to resume.
+- **Account-wide cap.** One check covers every selected project, so watching 4
   projects costs the same as watching 1.
+- **Survives long waits without touching your login.** It records the reset time
+  from the first check and waits it out; if the stored token expires meanwhile it
+  falls back to that known time. It never rewrites your credentials file (doing
+  so could log you out of Claude Code), and the resume runs through the `claude`
+  CLI, which refreshes its own auth.
 - **Resume-on-transition only.** It resumes *only* after it has observed a real
   capped → lifted transition. If you start it when you are **not** capped, it
   tells you there is nothing to wait for and stops — it will not run anything.
@@ -46,7 +55,8 @@ Then:
    auto-discover projects — only folders you add ever appear.
 2. Tick the project(s) to auto-continue. Each row shows the newest session and
    last activity (or "no Claude session yet" if Claude has never run there).
-3. Set **Check every (min)** (default 30).
+3. Set **Poll at most every (min)** (default 30) — the tool waits until the known
+   reset time, but re-checks at least this often.
 4. Edit the **wake prompt** if you want.
 5. Click **Start watching**.
 
@@ -55,7 +65,7 @@ writes each run to `logs\resume-*.log`.
 
 ### Stopping
 
-- **Stop button** or **closing the window** cancels the probe and any
+- **Stop button** or **closing the window** cancels the limit check and any
   in-progress resume jobs. Only jobs *this tool* started are touched — your real
   interactive Claude Code sessions are never killed.
 
@@ -63,11 +73,13 @@ writes each run to `logs\resume-*.log`.
 
 - **Autonomous resume.** The resume runs one long headless turn with no human in
   the loop. Keep the wake prompt scoped and review the saved logs.
-- **Weekly caps.** If you have hit a *weekly* limit, a short cooldown wait will
-  not help.
-- **Rate-limit wording.** Cap detection matches `usage limit / rate limit /
-  resets at / 429`. If Claude's live message uses different wording, adjust the
-  pattern in `Read-ProbeResult`.
+- **Weekly caps.** Detection watches the **5-hour session** window. If you've hit
+  the separate *weekly* limit, the 5h reset won't lift you, so the resume can
+  immediately re-cap. (The weekly status is available in the same headers
+  — `anthropic-ratelimit-unified-7d-*` — if you want to extend the tool.)
+- **Login required.** Detection reads your OAuth token from
+  `~/.claude/.credentials.json`. If you're signed out, it can't check the limit;
+  run `claude` once to sign in.
 
 ## Troubleshooting
 
@@ -81,8 +93,9 @@ writes each run to `logs\resume-*.log`.
   `logs\`. (The tool falls back to a tray balloon if the toast API is blocked.)
 - **A row shows "(no Claude session yet)"** — Claude has never run in that folder,
   so there is nothing to resume. Run `claude` there once, then **Refresh**.
-- **Cap not detected / detected wrongly** — see the rate-limit wording caveat
-  above; tune the pattern in `Read-ProbeResult`.
+- **"Couldn't read limit status"** — the tool couldn't read your OAuth token or
+  reach the API. Run `claude` once to confirm you're signed in, check your
+  network, then try again. The log line shows the HTTP detail.
 
 ## Files
 

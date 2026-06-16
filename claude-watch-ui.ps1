@@ -5,8 +5,12 @@
     headlessly and you get a toast + sound.
 
 .NOTES
-    The usage cap is account-wide, so a single probe detects the reset for all
-    selected projects. A capped probe costs no tokens. Launch with:
+    Cap detection reads Anthropic's unified rate-limit headers (the same data
+    behind the Claude app's Usage panel) from a tiny /v1/messages call using the
+    OAuth token Claude Code already stores. While capped the call returns HTTP
+    429 and costs nothing; the headers still report the exact 5h reset time, so
+    the tool learns precisely when to resume without parsing terminal text.
+    The cap is account-wide, so one check covers all selected projects. Launch:
       powershell -ExecutionPolicy Bypass -File G:\claudetokenresume\claude-watch-ui.ps1
 #>
 Add-Type -AssemblyName System.Windows.Forms
@@ -14,6 +18,8 @@ Add-Type -AssemblyName System.Drawing
 
 $claude = (Get-Command claude -ErrorAction SilentlyContinue).Source
 $projectsRoot = Join-Path $env:USERPROFILE ".claude\projects"
+# Claude Code's OAuth token lives here; we read it to query the limit headers.
+$credPath = Join-Path $env:USERPROFILE ".claude\.credentials.json"
 $logDir = Join-Path $PSScriptRoot "logs"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 
@@ -113,7 +119,7 @@ $btnRefresh.Text = "Refresh"; $btnRefresh.Location = '227,254'; $btnRefresh.Size
 $form.Controls.Add($btnRefresh)
 
 $lblInt = New-Object System.Windows.Forms.Label
-$lblInt.Text = "Check every (min):"; $lblInt.Location = '360,258'; $lblInt.AutoSize = $true
+$lblInt.Text = "Poll at most every (min):"; $lblInt.Location = '300,258'; $lblInt.AutoSize = $true
 $form.Controls.Add($lblInt)
 
 $num = New-Object System.Windows.Forms.NumericUpDown
@@ -161,6 +167,7 @@ $timer = New-Object System.Windows.Forms.Timer
 $script:Watching   = $false
 $script:Phase      = 'idle'
 $script:SawCap     = $false   # have we OBSERVED a real capped state yet?
+$script:ResetEpoch = $null    # unix secs when the 5h window resets (from headers)
 $script:ProbeJob   = $null
 $script:ResumeJobs = @()
 
@@ -190,22 +197,58 @@ function Stop-Watch([string]$status) {
     $lblStatus.Text = $status
 }
 
-# Classify a probe's text output. Returns 'capped', 'lifted', or 'unknown'.
-function Read-ProbeResult([string]$out) {
-    if (-not $out) { return 'unknown' }
-    if ($out -match '(?i)usage limit|rate limit|limit reached|resets? at|too many requests|429') { return 'capped' }
-    if ($out -match '(?i)READY') { return 'lifted' }
-    if ($out.Trim().Length -gt 0) { return 'lifted' }
-    return 'unknown'
-}
-
-# Start a quick probe in the background; the timer polls for its result.
+# Check the live limit status by reading Anthropic's unified rate-limit headers
+# off a minimal /v1/messages call. Runs in a background job (keeps the UI free)
+# and emits a one-line JSON result: { status; reset; http; detail }.
+#   status: 'capped' | 'lifted' | 'unknown'
+#   reset : unix secs the 5h window resets (from anthropic-ratelimit-unified-5h-*)
+# While capped the call is rejected with HTTP 429 (no token cost) but the reset
+# header is still present, so we learn exactly when to resume. An expired token
+# yields 401 -> 'unknown'; callers fall back to the reset time learned earlier.
 function Start-Probe {
     $script:Phase = 'probing'
-    $lblStatus.Text = "Checking the cap..."
+    $lblStatus.Text = "Checking the limit..."
     $script:ProbeJob = Start-Job -ScriptBlock {
-        & claude -p "Reply with the single word READY." 2>&1 | Out-String
-    }
+        param($cred)
+        $r = [ordered]@{ status = 'unknown'; reset = $null; http = $null; detail = '' }
+        try { $tok = (Get-Content $cred -Raw | ConvertFrom-Json).claudeAiOauth.accessToken }
+        catch { $r.detail = 'cannot read credentials'; return ($r | ConvertTo-Json -Compress) }
+        if (-not $tok) { $r.detail = 'no OAuth token'; return ($r | ConvertTo-Json -Compress) }
+
+        $headers = @{
+            'authorization'    = "Bearer $tok"
+            'anthropic-version'= '2023-06-01'
+            'anthropic-beta'   = 'oauth-2025-04-20'
+            'content-type'     = 'application/json'
+        }
+        $body = '{"model":"claude-haiku-4-5-20251001","max_tokens":1,"messages":[{"role":"user","content":"."}]}'
+
+        # Collect response headers from success OR error (429/401 still carry them).
+        $H = New-Object System.Collections.Hashtable ([System.StringComparer]::OrdinalIgnoreCase)
+        try {
+            $resp = Invoke-WebRequest -Uri 'https://api.anthropic.com/v1/messages' -Method Post `
+                        -Headers $headers -Body $body -UseBasicParsing -TimeoutSec 30
+            $r.http = [int]$resp.StatusCode
+            foreach ($k in $resp.Headers.Keys) { $H[$k] = "$($resp.Headers[$k])" }
+        } catch {
+            $resp = $_.Exception.Response
+            if ($null -eq $resp) { $r.detail = $_.Exception.Message; return ($r | ConvertTo-Json -Compress) }
+            try { $r.http = [int]$resp.StatusCode } catch { }
+            try { foreach ($k in $resp.Headers.AllKeys) { $H[$k] = "$($resp.Headers[$k])" } } catch { }
+        }
+
+        $st = $H['anthropic-ratelimit-unified-5h-status']
+        if (-not $st) { $st = $H['anthropic-ratelimit-unified-status'] }
+        $rs = $H['anthropic-ratelimit-unified-5h-reset']
+        if (-not $rs) { $rs = $H['anthropic-ratelimit-unified-reset'] }
+        if ($rs -match '^\d+$') { $r.reset = [long]$rs }
+
+        if     ($st)            { $r.status = if ($st -ieq 'allowed') { 'lifted' } else { 'capped' } }
+        elseif ($r.http -eq 429){ $r.status = 'capped' }
+        elseif ($r.http -eq 200){ $r.status = 'lifted' }
+        $r.detail = "http=$($r.http) 5h-status=$st reset=$rs"
+        return ($r | ConvertTo-Json -Compress)
+    } -ArgumentList $credPath
     $timer.Interval = 1500   # poll the job, keep UI responsive
     $timer.Start()
 }
@@ -241,23 +284,37 @@ function Invoke-Tick {
 
         'probing' {
             if ($script:ProbeJob.State -eq 'Running') { $timer.Start(); return }
-            $out = (Receive-Job $script:ProbeJob -ErrorAction SilentlyContinue | Out-String)
+            $raw = (Receive-Job $script:ProbeJob -ErrorAction SilentlyContinue | Where-Object { $_ } | Select-Object -Last 1)
             Remove-Job $script:ProbeJob -Force -ErrorAction SilentlyContinue
             $script:ProbeJob = $null
-            $script:LastProbe = $out
-            switch (Read-ProbeResult $out) {
+            $res = $null
+            try { $res = $raw | ConvertFrom-Json } catch { }
+            $status = if ($res) { $res.status } else { 'unknown' }
+            $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+            if ($res -and $res.reset) { $script:ResetEpoch = [long]$res.reset }
+
+            # Local time string for the known reset, if any.
+            $resetTxt = ""
+            if ($script:ResetEpoch) {
+                $resetTxt = " (resets {0:HH:mm})" -f [DateTimeOffset]::FromUnixTimeSeconds($script:ResetEpoch).ToLocalTime().DateTime
+            }
+
+            switch ($status) {
                 'capped' {
                     $script:SawCap = $true
-                    $reset = ""
-                    if ($out -match '(?i)resets? at\s+([^\r\n\.]+)') { $reset = " (reset: $($Matches[1].Trim()))" }
-                    Write-Log "Still capped$reset. Next check in $($num.Value) min."
-                    $lblStatus.Text = "Watching. Still capped$reset."
+                    Write-Log "Capped$resetTxt. Waiting for the window to reset."
+                    $lblStatus.Text = "Watching. Capped$resetTxt."
                     $script:Phase = 'waiting'
-                    $timer.Interval = [int]$num.Value * 60 * 1000
+                    # Wait until reset (+30s slack), but re-poll at least every
+                    # 'num' minutes so the UI stays alive / catches an early lift.
+                    $cap = [int]$num.Value * 60
+                    $secs = if ($script:ResetEpoch) { [int]($script:ResetEpoch - $now + 30) } else { 60 }
+                    if ($secs -lt 60) { $secs = 60 }
+                    if ($secs -gt $cap) { $secs = $cap }
+                    $timer.Interval = $secs * 1000
                     $timer.Start()
                 }
-                default {
-                    # 'lifted' (or unknown-but-responsive)
+                'lifted' {
                     if (-not $script:SawCap) {
                         Write-Log "Not currently rate-limited - nothing to resume."
                         Stop-Watch "Not rate-limited - idle."
@@ -266,14 +323,42 @@ function Invoke-Tick {
                             "Nothing to resume", 'OK', 'Information') | Out-Null
                         return
                     }
-                    Write-Log "Cap lifted -> resuming."
+                    Write-Log "Limit reset -> resuming."
                     Start-Resumes
+                }
+                default {
+                    # 'unknown' (e.g. expired token -> 401, or a network blip).
+                    $why = if ($res) { $res.detail } else { 'no response' }
+                    if (-not $script:SawCap) {
+                        # Never confirmed a cap; can't tell what's going on. Stop and explain.
+                        Write-Log "Could not read limit status ($why)."
+                        Stop-Watch "Couldn't read limit status."
+                        [System.Windows.Forms.MessageBox]::Show(
+                            "Couldn't read your usage-limit status from the API.`n`nDetail: $why`n`nMake sure you're logged in (run 'claude' once), then try again.",
+                            "Status unavailable", 'OK', 'Warning') | Out-Null
+                        return
+                    }
+                    # We already know a reset time. If it has passed, trust it and
+                    # resume (claude refreshes its own auth). Otherwise keep waiting.
+                    if ($script:ResetEpoch -and $now -ge $script:ResetEpoch) {
+                        Write-Log "Reset time reached (status unverified: $why) -> resuming."
+                        Start-Resumes
+                    } else {
+                        Write-Log "Status unverified ($why); waiting on known reset$resetTxt."
+                        $script:Phase = 'waiting'
+                        $cap = [int]$num.Value * 60
+                        $secs = if ($script:ResetEpoch) { [int]($script:ResetEpoch - $now + 30) } else { 60 }
+                        if ($secs -lt 60) { $secs = 60 }
+                        if ($secs -gt $cap) { $secs = $cap }
+                        $timer.Interval = $secs * 1000
+                        $timer.Start()
+                    }
                 }
             }
         }
 
         'waiting' {
-            Start-Probe   # interval elapsed; probe again
+            Start-Probe   # interval elapsed; check the limit again
         }
 
         'resuming' {
@@ -314,13 +399,15 @@ $btnStart.Add_Click({
         return
     }
 
-    $script:Watching = $true
-    $script:SawCap   = $false
+    $script:Watching   = $true
+    $script:SawCap     = $false
+    $script:ResetEpoch = $null
     $btnStart.Text = "Stop"; $btnStart.BackColor = [System.Drawing.Color]::FromArgb(207,34,46)
     $clb.Enabled = $false; $num.Enabled = $false; $txtPrompt.Enabled = $false
     $btnRefresh.Enabled = $false; $btnAdd.Enabled = $false; $btnRemove.Enabled = $false
-    Write-Log "Watching $(@($clb.CheckedItems).Count) project(s), checking every $($num.Value) min."
-    # First probe confirms you are actually capped. If not, it tells you and stops.
+    Write-Log "Watching $(@($clb.CheckedItems).Count) project(s); polling at most every $($num.Value) min."
+    # First check confirms you are actually capped (and learns the reset time).
+    # If you are not capped, it tells you and stops.
     Start-Probe
 })
 
