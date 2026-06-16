@@ -64,6 +64,21 @@ probing -> ... -> resuming -> idle`.
   Stop button and `FormClosing`. **Never kill `claude` by process name** — that
   would kill the user's real Claude Code sessions.
 
+## CLI variant (`claude-watch.ps1`)
+
+A standalone single-project watcher, intentionally simpler than the GUI. Known
+differences (documented in the README, not bugs to "fix" silently):
+
+- It is a **blocking `Start-Sleep` loop** (Ctrl+C to stop), not async.
+- It has **no not-capped guard** — starting it while not capped resumes
+  immediately. The GUI's `SawCap` guard is the safe path; the CLI assumes you are
+  already capped.
+- If `-Project` has no session log it falls back to the **newest session
+  anywhere**, which can resume a different project. Always pass `-Project`.
+
+If asked to make the CLI safer, port the `SawCap` transition guard and drop the
+newest-anywhere fallback (or make it opt-in).
+
 ## Conventions / gotchas
 
 - Pure Windows PowerShell 5.1 + WinForms. **No external modules** (toasts use the
