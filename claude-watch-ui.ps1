@@ -15,6 +15,13 @@
 #>
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+# Lets us paint the window's title bar dark to match the theme (Win10 1809+).
+try {
+    Add-Type -Namespace Native -Name Dwm -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("dwmapi.dll")]
+public static extern int DwmSetWindowAttribute(System.IntPtr hwnd, int attr, int[] val, int size);
+'@
+} catch { }
 
 $claude = (Get-Command claude -ErrorAction SilentlyContinue).Source
 $projectsRoot = Join-Path $env:USERPROFILE ".claude\projects"
@@ -90,64 +97,126 @@ function Send-Toast([string]$Title, [string]$Text) {
 }
 
 # --- Build the window -------------------------------------------------------
+# Flat dark theme. Palette:
+$cBg     = [System.Drawing.Color]::FromArgb(32, 33, 38)    # window
+$cPanel  = [System.Drawing.Color]::FromArgb(24, 25, 30)    # list / log
+$cInput  = [System.Drawing.Color]::FromArgb(43, 45, 52)    # editable fields
+$cText   = [System.Drawing.Color]::FromArgb(224, 226, 232) # primary text
+$cMuted  = [System.Drawing.Color]::FromArgb(150, 152, 162) # secondary text
+$cAccent = [System.Drawing.Color]::FromArgb(120, 170, 255) # title accent
+$cGreen  = [System.Drawing.Color]::FromArgb(46, 160, 67);  $cGreenH = [System.Drawing.Color]::FromArgb(56, 178, 82)
+$cRed    = [System.Drawing.Color]::FromArgb(207, 34, 46);  $cRedH   = [System.Drawing.Color]::FromArgb(224, 49, 61)
+$cBtn    = [System.Drawing.Color]::FromArgb(52, 54, 63);   $cBtnH   = [System.Drawing.Color]::FromArgb(66, 68, 80)
+
+function Set-FlatButton($b, $bg, $hover, $fore) {
+    $b.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+    $b.FlatAppearance.BorderSize = 0
+    $b.FlatAppearance.MouseOverBackColor = $hover
+    $b.FlatAppearance.MouseDownBackColor = $hover
+    $b.BackColor  = $bg
+    $b.ForeColor  = $fore
+    $b.Cursor     = [System.Windows.Forms.Cursors]::Hand
+    $b.TextAlign  = [System.Drawing.ContentAlignment]::MiddleCenter
+}
+
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "Claude Watch"
-$form.Size = New-Object System.Drawing.Size(640, 600)
+$form.ClientSize = New-Object System.Drawing.Size(660, 660)
 $form.StartPosition = "CenterScreen"
-$form.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+$form.Font = New-Object System.Drawing.Font("Segoe UI", 9.5)
+$form.BackColor = $cBg
+$form.ForeColor = $cText
+$form.FormBorderStyle = 'FixedSingle'
+$form.MaximizeBox = $false
+
+# Dark title bar to match the theme (DWMWA_USE_IMMERSIVE_DARK_MODE: 20, or 19 on
+# older builds). Best-effort; silently ignored where unsupported.
+$form.Add_Shown({
+    try {
+        $on = [int[]]@(1)
+        foreach ($attr in 20, 19) { [Native.Dwm]::DwmSetWindowAttribute($form.Handle, $attr, $on, 4) | Out-Null }
+    } catch { }
+})
+
+$lblTitle = New-Object System.Windows.Forms.Label
+$lblTitle.Text = "Claude Watch"
+$lblTitle.Location = '20,16'; $lblTitle.AutoSize = $true
+$lblTitle.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 16)
+$lblTitle.ForeColor = $cAccent
+$form.Controls.Add($lblTitle)
+
+$lblSub = New-Object System.Windows.Forms.Label
+$lblSub.Text = "Waits out the usage cap, then continues your work automatically."
+$lblSub.Location = '22,52'; $lblSub.AutoSize = $true
+$lblSub.ForeColor = $cMuted
+$form.Controls.Add($lblSub)
 
 $lbl = New-Object System.Windows.Forms.Label
-$lbl.Text = "Tick the project(s) to auto-continue when the usage window resets:"
-$lbl.Location = '15,12'; $lbl.AutoSize = $true
+$lbl.Text = "Projects to auto-continue when the window resets:"
+$lbl.Location = '20,88'; $lbl.AutoSize = $true
+$lbl.ForeColor = $cText
 $form.Controls.Add($lbl)
 
 $clb = New-Object System.Windows.Forms.CheckedListBox
-$clb.Location = '15,38'; $clb.Size = '595,210'
-$clb.CheckOnClick = $true; $clb.DisplayMember = 'Display'; $clb.Font = New-Object System.Drawing.Font("Consolas", 9)
+$clb.Location = '20,112'; $clb.Size = '620,200'
+$clb.CheckOnClick = $true; $clb.DisplayMember = 'Display'
+$clb.Font = New-Object System.Drawing.Font("Consolas", 9)
+$clb.BackColor = $cPanel; $clb.ForeColor = $cText
+$clb.BorderStyle = 'None'
 $form.Controls.Add($clb)
 
 $btnAdd = New-Object System.Windows.Forms.Button
-$btnAdd.Text = "Add project..."; $btnAdd.Location = '15,254'; $btnAdd.Size = '110,26'
+$btnAdd.Text = "+  Add project"; $btnAdd.Location = '20,324'; $btnAdd.Size = '124,30'
+Set-FlatButton $btnAdd $cBtn $cBtnH $cText
 $form.Controls.Add($btnAdd)
 
 $btnRemove = New-Object System.Windows.Forms.Button
-$btnRemove.Text = "Remove"; $btnRemove.Location = '131,254'; $btnRemove.Size = '90,26'
+$btnRemove.Text = "Remove"; $btnRemove.Location = '152,324'; $btnRemove.Size = '96,30'
+Set-FlatButton $btnRemove $cBtn $cBtnH $cText
 $form.Controls.Add($btnRemove)
 
 $btnRefresh = New-Object System.Windows.Forms.Button
-$btnRefresh.Text = "Refresh"; $btnRefresh.Location = '227,254'; $btnRefresh.Size = '90,26'
+$btnRefresh.Text = "Refresh"; $btnRefresh.Location = '256,324'; $btnRefresh.Size = '96,30'
+Set-FlatButton $btnRefresh $cBtn $cBtnH $cText
 $form.Controls.Add($btnRefresh)
 
 $lblInt = New-Object System.Windows.Forms.Label
-$lblInt.Text = "Poll at most every (min):"; $lblInt.Location = '300,258'; $lblInt.AutoSize = $true
+$lblInt.Text = "Poll at most every (min):"; $lblInt.Location = '418,331'; $lblInt.AutoSize = $true
+$lblInt.ForeColor = $cMuted
 $form.Controls.Add($lblInt)
 
 $num = New-Object System.Windows.Forms.NumericUpDown
-$num.Location = '475,256'; $num.Size = '60,24'; $num.Minimum = 5; $num.Maximum = 240; $num.Value = 30
+$num.Location = '580,328'; $num.Size = '60,24'; $num.Minimum = 5; $num.Maximum = 240; $num.Value = 30
+$num.BackColor = $cInput; $num.ForeColor = $cText; $num.BorderStyle = 'FixedSingle'
 $form.Controls.Add($num)
 
 $lblP = New-Object System.Windows.Forms.Label
-$lblP.Text = "Wake prompt sent on resume:"; $lblP.Location = '15,290'; $lblP.AutoSize = $true
+$lblP.Text = "Wake prompt sent on resume:"; $lblP.Location = '20,368'; $lblP.AutoSize = $true
+$lblP.ForeColor = $cText
 $form.Controls.Add($lblP)
 
 $txtPrompt = New-Object System.Windows.Forms.TextBox
-$txtPrompt.Location = '15,312'; $txtPrompt.Size = '595,70'
+$txtPrompt.Location = '20,392'; $txtPrompt.Size = '620,72'
 $txtPrompt.Multiline = $true; $txtPrompt.ScrollBars = 'Vertical'; $txtPrompt.Text = $defaultPrompt
+$txtPrompt.BackColor = $cInput; $txtPrompt.ForeColor = $cText; $txtPrompt.BorderStyle = 'FixedSingle'
 $form.Controls.Add($txtPrompt)
 
 $btnStart = New-Object System.Windows.Forms.Button
-$btnStart.Text = "Start watching"; $btnStart.Location = '15,392'; $btnStart.Size = '140,32'
-$btnStart.BackColor = [System.Drawing.Color]::FromArgb(46,160,67); $btnStart.ForeColor = 'White'
+$btnStart.Text = "Start watching"; $btnStart.Location = '20,484'; $btnStart.Size = '160,40'
+$btnStart.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 10)
+Set-FlatButton $btnStart $cGreen $cGreenH ([System.Drawing.Color]::White)
 $form.Controls.Add($btnStart)
 
 $lblStatus = New-Object System.Windows.Forms.Label
-$lblStatus.Text = "Idle."; $lblStatus.Location = '170,400'; $lblStatus.AutoSize = $true
+$lblStatus.Text = "Idle."; $lblStatus.Location = '196,496'; $lblStatus.AutoSize = $true
+$lblStatus.ForeColor = $cMuted
 $form.Controls.Add($lblStatus)
 
 $log = New-Object System.Windows.Forms.TextBox
-$log.Location = '15,432'; $log.Size = '595,120'
+$log.Location = '20,536'; $log.Size = '620,108'
 $log.Multiline = $true; $log.ScrollBars = 'Vertical'; $log.ReadOnly = $true
-$log.Font = New-Object System.Drawing.Font("Consolas", 8)
+$log.Font = New-Object System.Drawing.Font("Consolas", 8.5)
+$log.BackColor = $cPanel; $log.ForeColor = $cMuted; $log.BorderStyle = 'FixedSingle'
 $form.Controls.Add($log)
 
 function Write-Log([string]$msg) {
@@ -191,7 +260,8 @@ function Clear-Jobs {
 function Stop-Watch([string]$status) {
     $timer.Stop(); $script:Watching = $false; $script:Phase = 'idle'
     Clear-Jobs
-    $btnStart.Text = "Start watching"; $btnStart.BackColor = [System.Drawing.Color]::FromArgb(46,160,67)
+    $btnStart.Text = "Start watching"
+    $btnStart.BackColor = $cGreen; $btnStart.FlatAppearance.MouseOverBackColor = $cGreenH
     $clb.Enabled = $true; $num.Enabled = $true; $txtPrompt.Enabled = $true
     $btnRefresh.Enabled = $true; $btnAdd.Enabled = $true; $btnRemove.Enabled = $true
     $lblStatus.Text = $status
@@ -402,7 +472,8 @@ $btnStart.Add_Click({
     $script:Watching   = $true
     $script:SawCap     = $false
     $script:ResetEpoch = $null
-    $btnStart.Text = "Stop"; $btnStart.BackColor = [System.Drawing.Color]::FromArgb(207,34,46)
+    $btnStart.Text = "Stop"
+    $btnStart.BackColor = $cRed; $btnStart.FlatAppearance.MouseOverBackColor = $cRedH
     $clb.Enabled = $false; $num.Enabled = $false; $txtPrompt.Enabled = $false
     $btnRefresh.Enabled = $false; $btnAdd.Enabled = $false; $btnRemove.Enabled = $false
     Write-Log "Watching $(@($clb.CheckedItems).Count) project(s); polling at most every $($num.Value) min."
