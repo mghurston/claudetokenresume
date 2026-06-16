@@ -7,14 +7,14 @@
 .NOTES
     The usage cap is account-wide, so a single probe detects the reset for all
     selected projects. A capped probe costs no tokens. Launch with:
-      powershell -ExecutionPolicy Bypass -File G:\claude-tools\claude-watch-ui.ps1
+      powershell -ExecutionPolicy Bypass -File G:\claudetokenresume\claude-watch-ui.ps1
 #>
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
 $claude = (Get-Command claude -ErrorAction SilentlyContinue).Source
 $projectsRoot = Join-Path $env:USERPROFILE ".claude\projects"
-$logDir = "G:\claude-tools\logs"
+$logDir = Join-Path $PSScriptRoot "logs"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 
 $defaultPrompt = "The usage limit has reset. Continue exactly where you left off. Re-read the last few messages for context, then keep going until the task is done. If anything is ambiguous, make the most reasonable choice and note it."

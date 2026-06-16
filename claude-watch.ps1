@@ -24,7 +24,7 @@
     Minutes between probes while still capped. Default 10.
 
 .EXAMPLE
-    powershell -ExecutionPolicy Bypass -File G:\claude-tools\claude-watch.ps1 -Project G:\claudefitness
+    powershell -ExecutionPolicy Bypass -File G:\claudetokenresume\claude-watch.ps1 -Project G:\claudefitness
 #>
 [CmdletBinding()]
 param(
@@ -62,7 +62,7 @@ if (-not $Session) {
     Write-Host "Using session: $Session  (project: $Project)"
 }
 
-$logDir = "G:\claude-tools\logs"
+$logDir = Join-Path $PSScriptRoot "logs"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 $stamp  = Get-Date -Format "yyyyMMdd-HHmmss"
 $runLog = Join-Path $logDir "resume-$stamp.log"
