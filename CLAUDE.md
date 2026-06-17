@@ -5,10 +5,11 @@ Guidance for working on this repo (Claude Token Resume / "Claude Watch").
 ## What this project is
 
 A small, dependency-free **Windows** utility that waits out the Claude Code
-**usage-limit cooldown** and then **auto-continues** the user's work headlessly,
-with desktop toast + sound notifications. The user runs it *after* hitting the
-cap; it detects when the rolling usage window resets and resumes the selected
-project(s).
+**usage-limit cooldown** and then **auto-continues** the user's work by reopening
+each session in its own **visible terminal** (`claude --resume <id>`), with
+desktop toast + sound notifications. The user can arm it *before* hitting the cap
+(it stays armed and keeps polling); it detects when the rolling usage window
+resets and resumes the selected project(s) in windows the user can watch / drive.
 
 This is a personal tool, not a library. Prioritize: it must never act
 surprisingly (no runaway autonomous runs), the GUI must never freeze, and it
@@ -35,10 +36,13 @@ must never interfere with the user's real interactive Claude Code sessions.
   later expires (401 -> `unknown`); the resume itself runs through the `claude`
   CLI, which manages its own auth.
 - **Resume only on a real capped -> lifted transition.** `$script:SawCap` must
-  become true (an observed capped check) before any resume can fire. If the
-  first check shows "not capped", the tool tells the user there's nothing to
-  wait for and stops. **Do not regress this** — an early version resumed
-  immediately when started while not capped, which was the worst bug.
+  become true (an observed capped check) before any resume can fire. **Do not
+  regress this** — an early version resumed immediately when started while not
+  capped, which was the worst bug. The tool can be *armed before* the cap: if the
+  first check shows "not capped" it stays in `waiting` and keeps polling (it does
+  NOT stop, and does NOT resume) until a real cap is observed, then waits for the
+  lift. A fatal login error (unreadable credentials / no token) still stops with
+  a dialog, since arming is pointless without a readable token.
 - **Everything is async.** The limit check and resume run as PowerShell
   background jobs polled by a `System.Windows.Forms.Timer`. Nothing blocks the UI
   thread. Do not put synchronous `Invoke-WebRequest`/`& claude ...` calls on the
@@ -56,7 +60,14 @@ must never interfere with the user's real interactive Claude Code sessions.
 ## Architecture of the GUI (`claude-watch-ui.ps1`)
 
 State machine driven by one timer. Phases: `idle -> probing -> waiting ->
-probing -> ... -> resuming -> idle`.
+probing -> ... -> (capped->lifted) -> open resume windows -> RE-ARM (back to
+waiting) -> ...`. The watch **loops through every cap cycle** so it can run
+unattended for a full day: after launching the resume windows it resets
+`$script:SawCap` and returns to `waiting` instead of going idle, so it rides out
+the next cap too. Only **Stop** or closing the window ends the run. There is no
+`resuming` polling phase: the launched terminals run independently of the GUI,
+and each re-arm re-resolves the project's newest session id (a prior resume may
+have advanced the conversation into a new jsonl).
 
 - **Explicit project list, NOT auto-discovery.** The user adds project folders
   via the Add button; paths persist to `projects.txt` (git-ignored). An earlier
@@ -72,8 +83,20 @@ probing -> ... -> resuming -> idle`.
   `status` is `capped` / `lifted` / `unknown`. `Invoke-Tick`'s `probing` branch
   parses it and (when capped) waits until `reset` (+30s), re-polling at most
   every `num` minutes.
-- `Start-Resumes` — launches one background job per ticked project running
-  `claude -p --resume <session> <prompt>`, output to `logs\resume-*.log`.
+- `Start-Resumes` — for each ticked project, writes a tiny generated
+  `logs\resume-*.cmd` launcher (`cd` to the project, then `claude --resume
+  <session> [--permission-mode <mode>] "<prompt>"`) and `Start-Process`es it so
+  each session reopens in its **own visible terminal window** — interactive, not
+  headless `claude -p`. The `<mode>` comes from the Permissions dropdown
+  (`acceptEdits` default / `bypassPermissions` / `default`); an unattended resume
+  needs at least `acceptEdits` or it stalls at the first tool-permission prompt
+  (that was the empty-log bug). These windows are the user's to drive — the tool
+  never closes them (`Clear-Jobs`/`FormClosing` only touch the probe job). After
+  launching, it **re-arms** (resets `SawCap`/`ResetEpoch`, returns to `waiting`)
+  rather than calling `Stop-Watch`, so the run continues across caps; it
+  re-resolves each project's newest session per cycle so a moved-on conversation
+  still resumes correctly. Each cap cycle opens a fresh window (stale ones from
+  earlier cycles can be closed manually).
 - `Invoke-Tick` — the state machine body.
 - `Clear-Jobs` — stops/removes **only this tool's** jobs. Called by both the
   Stop button and `FormClosing`. **Never kill `claude` by process name** — that
@@ -103,3 +126,7 @@ probing -> ... -> resuming -> idle`.
 
 - GitHub: https://github.com/mghurston/claudetokenresume (branch `main`).
 - Local path: `G:\claudetokenresume`.
+- Author: mghurston — website https://www.michaelghurston.com/, links
+  https://linktr.ee/mghurston. The GUI shows both as a clickable banner
+  (`$banner` LinkLabel) and the README carries the same attribution; keep them in
+  sync if either URL changes.

@@ -1,8 +1,10 @@
 <#
 .SYNOPSIS
-    GUI for Claude Watch. Pick one or more projects; when the usage-limit window
-    resets, each selected project's most recent session is auto-continued
-    headlessly and you get a toast + sound.
+    GUI for Claude Watch. Pick one or more projects, then arm the watch at any
+    time (even before you're capped). When the usage-limit window resets, each
+    selected project's most recent session is reopened in its own VISIBLE
+    terminal running `claude --resume <id>`, so you watch it continue exactly
+    where you left off and can take over. You also get a toast + sound.
 
 .NOTES
     Cap detection reads Anthropic's unified rate-limit headers (the same data
@@ -10,6 +12,8 @@
     OAuth token Claude Code already stores. While capped the call returns HTTP
     429 and costs nothing; the headers still report the exact 5h reset time, so
     the tool learns precisely when to resume without parsing terminal text.
+    Resume opens a real terminal window (not a headless `claude -p` run) so the
+    work is visible and the session stays interactive.
     The cap is account-wide, so one check covers all selected projects. Launch:
       powershell -ExecutionPolicy Bypass -File G:\claudetokenresume\claude-watch-ui.ps1
 #>
@@ -76,8 +80,8 @@ function Resolve-Project([string]$path) {
              Sort-Object LastWriteTime -Descending | Select-Object -First 1
         if ($j) { $session = $j.BaseName; $last = $j.LastWriteTime }
     }
-    $disp = if ($session) { "{0,-42}  last: {1:MM/dd HH:mm}" -f $norm, $last }
-            else          { "{0,-42}  (no Claude session yet)" -f $norm }
+    $disp = if ($session) { "{0,-40}  {1}  last: {2:MM/dd HH:mm}" -f $norm, $session.Substring(0,8), $last }
+            else          { "{0,-40}  (no Claude session yet)" -f $norm }
     [PSCustomObject]@{ Path = $norm; Session = $session; Last = $last; Display = $disp }
 }
 
@@ -121,7 +125,7 @@ function Set-FlatButton($b, $bg, $hover, $fore) {
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "Claude Watch"
-$form.ClientSize = New-Object System.Drawing.Size(660, 660)
+$form.ClientSize = New-Object System.Drawing.Size(660, 694)
 $form.StartPosition = "CenterScreen"
 $form.Font = New-Object System.Drawing.Font("Segoe UI", 9.5)
 $form.BackColor = $cBg
@@ -146,7 +150,7 @@ $lblTitle.ForeColor = $cAccent
 $form.Controls.Add($lblTitle)
 
 $lblSub = New-Object System.Windows.Forms.Label
-$lblSub.Text = "Waits out the usage cap, then continues your work automatically."
+$lblSub.Text = "Arm it any time. It waits out the cap, then opens your session so it keeps going."
 $lblSub.Location = '22,52'; $lblSub.AutoSize = $true
 $lblSub.ForeColor = $cMuted
 $form.Controls.Add($lblSub)
@@ -195,6 +199,22 @@ $lblP.Text = "Wake prompt sent on resume:"; $lblP.Location = '20,368'; $lblP.Aut
 $lblP.ForeColor = $cText
 $form.Controls.Add($lblP)
 
+# How autonomous the resumed (unattended) session is. acceptEdits keeps it
+# moving on file edits but still pauses for risky ops; bypassPermissions runs
+# everything; default makes it wait for you to approve each tool use.
+$lblPerm = New-Object System.Windows.Forms.Label
+$lblPerm.Text = "Permissions:"; $lblPerm.Location = '452,368'; $lblPerm.AutoSize = $true
+$lblPerm.ForeColor = $cMuted
+$form.Controls.Add($lblPerm)
+
+$cboPerm = New-Object System.Windows.Forms.ComboBox
+$cboPerm.Location = '534,364'; $cboPerm.Size = '106,24'
+$cboPerm.DropDownStyle = 'DropDownList'; $cboPerm.FlatStyle = 'Flat'
+$cboPerm.BackColor = $cInput; $cboPerm.ForeColor = $cText
+[void]$cboPerm.Items.AddRange(@('acceptEdits','bypassPermissions','default'))
+$cboPerm.SelectedIndex = 0
+$form.Controls.Add($cboPerm)
+
 $txtPrompt = New-Object System.Windows.Forms.TextBox
 $txtPrompt.Location = '20,392'; $txtPrompt.Size = '620,72'
 $txtPrompt.Multiline = $true; $txtPrompt.ScrollBars = 'Vertical'; $txtPrompt.Text = $defaultPrompt
@@ -207,8 +227,19 @@ $btnStart.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 10)
 Set-FlatButton $btnStart $cGreen $cGreenH ([System.Drawing.Color]::White)
 $form.Controls.Add($btnStart)
 
+# Continuous = ride out every cap cycle (the 24h autonomous mode). Unchecked =
+# stop after the first cap->lift->resume. Read live at resume time, so you can
+# flip it mid-run. Checked by default since unattended long runs are the point.
+$chkContinuous = New-Object System.Windows.Forms.CheckBox
+$chkContinuous.Text = "Keep watching after each reset (run until I stop)"
+$chkContinuous.Location = '198,485'; $chkContinuous.AutoSize = $true
+$chkContinuous.Checked = $true
+$chkContinuous.ForeColor = $cText; $chkContinuous.BackColor = $cBg
+$chkContinuous.FlatStyle = 'Flat'
+$form.Controls.Add($chkContinuous)
+
 $lblStatus = New-Object System.Windows.Forms.Label
-$lblStatus.Text = "Idle."; $lblStatus.Location = '196,496'; $lblStatus.AutoSize = $true
+$lblStatus.Text = "Idle."; $lblStatus.Location = '198,508'; $lblStatus.AutoSize = $true
 $lblStatus.ForeColor = $cMuted
 $form.Controls.Add($lblStatus)
 
@@ -219,6 +250,22 @@ $log.Font = New-Object System.Drawing.Font("Consolas", 8.5)
 $log.BackColor = $cPanel; $log.ForeColor = $cMuted; $log.BorderStyle = 'FixedSingle'
 $form.Controls.Add($log)
 
+# Attribution banner for anyone who downloads this from the repo. Two clickable
+# links (website + Linktree); each region opens its own URL via LinkData.
+$banner = New-Object System.Windows.Forms.LinkLabel
+$banner.Text = "Made by mghurston   -   michaelghurston.com   -   linktr.ee/mghurston"
+$banner.Location = '20,656'; $banner.AutoSize = $true
+$banner.BackColor = $cBg
+$banner.ForeColor = $cMuted
+$banner.LinkColor = $cAccent
+$banner.ActiveLinkColor = $cAccent
+$banner.LinkBehavior = [System.Windows.Forms.LinkBehavior]::HoverUnderline
+$banner.Links.Clear()
+[void]$banner.Links.Add($banner.Text.IndexOf('michaelghurston.com'), 'michaelghurston.com'.Length, 'https://www.michaelghurston.com/')
+[void]$banner.Links.Add($banner.Text.IndexOf('linktr.ee/mghurston'), 'linktr.ee/mghurston'.Length, 'https://linktr.ee/mghurston')
+$banner.Add_LinkClicked({ param($s, $e) try { Start-Process ([string]$e.Link.LinkData) } catch { } })
+$form.Controls.Add($banner)
+
 function Write-Log([string]$msg) {
     $line = "[{0}] {1}" -f (Get-Date -Format "HH:mm:ss"), $msg
     $log.AppendText($line + "`r`n")
@@ -226,35 +273,39 @@ function Write-Log([string]$msg) {
 
 function Load-List {
     $clb.Items.Clear()
-    foreach ($p in Get-ConfigPaths) { [void]$clb.Items.Add((Resolve-Project $p)) }
+    foreach ($p in Get-ConfigPaths) {
+        $r = Resolve-Project $p
+        [void]$clb.Items.Add($r)
+        if ($r.Session) {
+            Write-Log ("  {0} -> session {1} (last {2:MM/dd HH:mm})" -f $r.Path, $r.Session.Substring(0,8), $r.Last)
+        } else {
+            Write-Log "  $($r.Path) -> (no Claude session yet)"
+        }
+    }
     Write-Log "Loaded $($clb.Items.Count) project(s) from $([System.IO.Path]::GetFileName($configPath))."
 }
 
 # --- State machine (all async so the window never freezes) ------------------
-# Phases: idle -> probing -> waiting -> probing -> ... -> resuming -> idle
+# Phases: idle -> probing -> waiting -> probing -> ... -> (cap->lift) -> open
+# resume windows -> RE-ARM (back to waiting) -> ... and so on. The watch loops
+# through every cap cycle so it can run unattended for a full day; only Stop or
+# closing the window ends it.
 $timer = New-Object System.Windows.Forms.Timer
 $script:Watching   = $false
 $script:Phase      = 'idle'
 $script:SawCap     = $false   # have we OBSERVED a real capped state yet?
 $script:ResetEpoch = $null    # unix secs when the 5h window resets (from headers)
 $script:ProbeJob   = $null
-$script:ResumeJobs = @()
+$script:Cycle      = 0        # how many cap->lift resumes we've fired this run
 
-# Stop & remove only THIS tool's jobs (never touches your real claude sessions).
+# Stop & remove only THIS tool's probe job (never touches your real claude
+# sessions). Resume windows are real terminals you drive - we never close them.
 function Clear-Jobs {
     if ($script:ProbeJob) {
         Stop-Job   $script:ProbeJob -ErrorAction SilentlyContinue
         Remove-Job $script:ProbeJob -Force -ErrorAction SilentlyContinue
         $script:ProbeJob = $null
     }
-    foreach ($r in @($script:ResumeJobs)) {
-        if ($r.Job.State -eq 'Running') {
-            Stop-Job $r.Job -ErrorAction SilentlyContinue
-            Write-Log "Stopped resume: $($r.Path)"
-        }
-        Remove-Job $r.Job -Force -ErrorAction SilentlyContinue
-    }
-    $script:ResumeJobs = @()
 }
 
 function Stop-Watch([string]$status) {
@@ -323,26 +374,72 @@ function Start-Probe {
     $timer.Start()
 }
 
-# Launch the resumes as background jobs (so a long run never freezes the UI).
+# Reopen each ticked project's session in its OWN visible terminal, resuming the
+# SAME conversation interactively (`claude --resume <id>`). We deliberately do
+# NOT run headless `claude -p`: the whole point is that the work is visible, the
+# session stays interactive, and you can watch it or take over. Each window is a
+# tiny generated .cmd so the wake prompt's spaces/quotes survive intact.
+#
+# After launching, we RE-ARM rather than stop: the tool goes back to waiting so
+# it rides out the next cap cycle too, enabling unattended multi-cap (24h) runs.
 function Start-Resumes {
+    $script:Cycle++
     $targets = @($clb.CheckedItems)
-    Send-Toast "Claude resuming" "Window reset. Launching $($targets.Count) project(s) in the background..."
-    $script:ResumeJobs = @()
-    foreach ($p in $targets) {
-        $stamp  = Get-Date -Format "yyyyMMdd-HHmmss"
-        $runLog = Join-Path $logDir ("resume-{0}-{1}.log" -f ($p.Session.Substring(0,8)), $stamp)
-        Write-Log "Launching resume: $($p.Path)"
-        $job = Start-Job -ScriptBlock {
-            param($dir, $sess, $prompt, $log)
-            Set-Location $dir
-            "=== Resume $(Get-Date -Format yyyyMMdd-HHmmss) | $dir | session $sess ===" | Out-File $log -Encoding utf8
-            & claude -p --resume $sess $prompt 2>&1 | Out-File $log -Append -Encoding utf8
-        } -ArgumentList $p.Path, $p.Session, $txtPrompt.Text, $runLog
-        $script:ResumeJobs += [PSCustomObject]@{ Job = $job; Path = $p.Path; Log = $runLog }
+    $mode = "$($cboPerm.SelectedItem)"
+    Send-Toast "Claude resuming" "Window reset (cycle $($script:Cycle)). Opening session(s) so they keep going."
+    $opened = 0
+    foreach ($t in $targets) {
+        # Re-resolve to the project's CURRENT newest session: an earlier resume
+        # in this run may have advanced the conversation into a new session id,
+        # so the captured-at-arm-time id can be stale by now.
+        $p = Resolve-Project $t.Path
+        if (-not $p.Session) {
+            Write-Log "Skip $($p.Path): no Claude session found to resume."
+            continue
+        }
+        $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+        $name  = Split-Path $p.Path -Leaf
+        # Escape for a double-quoted batch argument: %->%% and "->' (rare).
+        $safePrompt = ($txtPrompt.Text -replace '%','%%') -replace '"',"'"
+        $modeArg = if ($mode -and $mode -ne 'default') { "--permission-mode $mode " } else { "" }
+        $launcher = Join-Path $logDir ("resume-{0}-{1}.cmd" -f ($p.Session.Substring(0,8)), $stamp)
+        @(
+            '@echo off'
+            "title Claude Watch resume - $name (cycle $($script:Cycle))"
+            "cd /d `"$($p.Path)`""
+            "echo Resuming session $($p.Session)"
+            "echo in $($p.Path)"
+            'echo.'
+            "claude --resume $($p.Session) $modeArg`"$safePrompt`""
+            'echo.'
+            'echo === Claude session ended. You can close this window. ==='
+            'pause'
+        ) | Set-Content -LiteralPath $launcher -Encoding ascii
+        Start-Process -FilePath $env:ComSpec -ArgumentList '/c', "`"$launcher`""
+        Write-Log "Opened resume window: $name (session $($p.Session.Substring(0,8)))"
+        $opened++
     }
-    $script:Phase = 'resuming'
-    $lblStatus.Text = "Resuming $($targets.Count) project(s) in background..."
-    $timer.Interval = 4000
+    # One-shot mode (toggle off): resume once, then go idle as before.
+    if (-not $chkContinuous.Checked) {
+        Send-Toast "Claude resumed" "Opened $opened live window(s). They continue where you left off."
+        Stop-Watch "Resumed - see the new terminal window(s)."
+        Write-Log "Watch complete (one-shot) - the resume windows are now yours to drive."
+        return
+    }
+
+    Send-Toast "Claude resumed" "Opened $opened live window(s). Re-arming for the next cap."
+
+    # Continuous mode: re-arm for the next cap instead of going idle. We do NOT
+    # re-probe instantly: right after a lift a stale 'capped' header could
+    # otherwise fire a second resume immediately. Waiting the normal poll interval
+    # lets the lift settle and gives the freshly resumed session time to start
+    # consuming again. The next observed cap re-sets SawCap and the cycle repeats.
+    $script:SawCap     = $false
+    $script:ResetEpoch = $null
+    $script:Phase      = 'waiting'
+    $lblStatus.Text = "Re-armed (cycle $($script:Cycle) done). Watching for the next cap..."
+    Write-Log "Re-armed after cycle $($script:Cycle); will resume again after the next cap resets. (Stop to end the run.)"
+    $timer.Interval = [int]$num.Value * 60 * 1000
     $timer.Start()
 }
 
@@ -386,11 +483,14 @@ function Invoke-Tick {
                 }
                 'lifted' {
                     if (-not $script:SawCap) {
-                        Write-Log "Not currently rate-limited - nothing to resume."
-                        Stop-Watch "Not rate-limited - idle."
-                        [System.Windows.Forms.MessageBox]::Show(
-                            "You are NOT currently hitting the usage limit, so there is nothing to wait for.`n`nStart Claude Watch only AFTER you have hit the cap in a session. It will then wait for the window to reset and continue your selected project(s).",
-                            "Nothing to resume", 'OK', 'Information') | Out-Null
+                        # Not capped yet. Don't resume (resuming while uncapped was
+                        # the worst-ever bug) - just stay armed and keep polling
+                        # until a real cap appears.
+                        Write-Log "Not capped yet - armed. Will auto-resume after you hit the cap and it resets."
+                        $lblStatus.Text = "Armed. Watching for the cap$resetTxt..."
+                        $script:Phase = 'waiting'
+                        $timer.Interval = [int]$num.Value * 60 * 1000
+                        $timer.Start()
                         return
                     }
                     Write-Log "Limit reset -> resuming."
@@ -400,12 +500,21 @@ function Invoke-Tick {
                     # 'unknown' (e.g. expired token -> 401, or a network blip).
                     $why = if ($res) { $res.detail } else { 'no response' }
                     if (-not $script:SawCap) {
-                        # Never confirmed a cap; can't tell what's going on. Stop and explain.
-                        Write-Log "Could not read limit status ($why)."
-                        Stop-Watch "Couldn't read limit status."
-                        [System.Windows.Forms.MessageBox]::Show(
-                            "Couldn't read your usage-limit status from the API.`n`nDetail: $why`n`nMake sure you're logged in (run 'claude' once), then try again.",
-                            "Status unavailable", 'OK', 'Warning') | Out-Null
+                        # A fatal login problem makes arming pointless - stop and explain.
+                        if ($why -match 'credential|OAuth token') {
+                            Write-Log "Could not read your login ($why)."
+                            Stop-Watch "Couldn't read login."
+                            [System.Windows.Forms.MessageBox]::Show(
+                                "Couldn't read your Claude login from .credentials.json.`n`nDetail: $why`n`nMake sure you're logged in (run 'claude' once), then try again.",
+                                "Login unavailable", 'OK', 'Warning') | Out-Null
+                            return
+                        }
+                        # Transient (network/401 blip). Stay armed and keep polling.
+                        Write-Log "Status unreadable for now ($why); staying armed."
+                        $lblStatus.Text = "Armed (status unclear); retrying..."
+                        $script:Phase = 'waiting'
+                        $timer.Interval = [int]$num.Value * 60 * 1000
+                        $timer.Start()
                         return
                     }
                     # We already know a reset time. If it has passed, trust it and
@@ -430,24 +539,6 @@ function Invoke-Tick {
         'waiting' {
             Start-Probe   # interval elapsed; check the limit again
         }
-
-        'resuming' {
-            $running = @($script:ResumeJobs | Where-Object { $_.Job.State -eq 'Running' })
-            if ($running.Count -gt 0) {
-                $lblStatus.Text = "Resuming... $($running.Count) still running."
-                $timer.Start(); return
-            }
-            foreach ($r in $script:ResumeJobs) {
-                Receive-Job $r.Job -ErrorAction SilentlyContinue | Out-Null
-                Remove-Job $r.Job -Force -ErrorAction SilentlyContinue
-                Write-Log "Finished: $($r.Path) -> $($r.Log)"
-            }
-            $n = $script:ResumeJobs.Count
-            $script:ResumeJobs = @()
-            Send-Toast "Claude finished" "Resumed $n project(s). Logs in $logDir"
-            Stop-Watch "Done. See logs."
-            Write-Log "Watch complete."
-        }
     }
 }
 
@@ -469,16 +560,20 @@ $btnStart.Add_Click({
         return
     }
 
+    foreach ($p in @($clb.CheckedItems)) {
+        Write-Log "Armed to resume $($p.Path) -> session $($p.Session)"
+    }
     $script:Watching   = $true
     $script:SawCap     = $false
     $script:ResetEpoch = $null
+    $script:Cycle      = 0
     $btnStart.Text = "Stop"
     $btnStart.BackColor = $cRed; $btnStart.FlatAppearance.MouseOverBackColor = $cRedH
     $clb.Enabled = $false; $num.Enabled = $false; $txtPrompt.Enabled = $false
     $btnRefresh.Enabled = $false; $btnAdd.Enabled = $false; $btnRemove.Enabled = $false
     Write-Log "Watching $(@($clb.CheckedItems).Count) project(s); polling at most every $($num.Value) min."
-    # First check confirms you are actually capped (and learns the reset time).
-    # If you are not capped, it tells you and stops.
+    # You can arm this before you're capped: if not capped yet it stays armed and
+    # keeps polling, and only resumes after a real capped -> lifted transition.
     Start-Probe
 })
 

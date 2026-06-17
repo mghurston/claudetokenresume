@@ -1,5 +1,7 @@
 # Claude Token Resume (Claude Watch)
 
+> **Made by mghurston** · Website: **https://www.michaelghurston.com/** · Links: **https://linktr.ee/mghurston**
+
 A small Windows tool that waits out the Claude Code **usage-limit cooldown** and
 then **auto-continues** your work headlessly, with a desktop toast + sound when
 it starts and finishes.
