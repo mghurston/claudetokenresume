@@ -35,6 +35,23 @@ claude -p --resume <session-id> "<your wake prompt>"
   capped → lifted transition. If you start it when you are **not** capped, it
   tells you there is nothing to wait for and stops — it will not run anything.
 
+## Your credentials stay yours
+
+This repo contains **no API key and no token** — nothing personal is committed,
+and nothing ever was (the history is clean). When you run it, the tool reads the
+OAuth token from **your own** machine at a path derived from your environment:
+
+```powershell
+$credPath = Join-Path $env:USERPROFILE ".claude\.credentials.json"
+```
+
+`%USERPROFILE%` resolves to whoever launched the script, so it uses **your**
+existing Claude Code login — there is no way to accidentally use anyone else's.
+There's no separate API key to set up; if you're signed in to Claude Code, it
+just works. The token is **read-only** — the tool never writes your credentials
+file. Your watched-project list (`projects.txt`) and resume output (`logs/`) are
+git-ignored and never leave your machine.
+
 ## Requirements
 
 - Windows 10/11 (uses native toast notifications; no modules to install)
