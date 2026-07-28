@@ -77,6 +77,7 @@ const elements = {
   restartDialog: document.querySelector("#restartDialog"),
   restartForm: document.querySelector("#restartForm"),
   restartOverlay: document.querySelector("#restartOverlay"),
+  restartReload: document.querySelector("#restartReload"),
   restartStatus: document.querySelector("#restartStatus"),
   restartWarning: document.querySelector("#restartWarning"),
   signinOverlay: document.querySelector("#signinOverlay"),
@@ -222,11 +223,22 @@ function showSigninOverlay(reason) {
     sessionStorage.removeItem(TOKEN_KEY);
     studioToken = "";
   }
-  elements.signinReason.textContent = reason;
-  elements.signinOverlay.classList.remove("hidden");
+  // Whatever else is on screen, this is the only actionable thing left.
+  elements.restartOverlay?.classList.add("hidden");
+  // Several requests fail together on a dead token. The first reason is the
+  // accurate one — by the second call the token has already been cleared, so
+  // it would wrongly report the tab as having opened without one.
+  if (elements.signinOverlay.classList.contains("hidden")) {
+    elements.signinReason.textContent = reason;
+    elements.signinOverlay.classList.remove("hidden");
+  }
 }
 
 elements.signinRetry?.addEventListener("click", () => {
+  window.location.reload();
+});
+
+elements.restartReload?.addEventListener("click", () => {
   window.location.reload();
 });
 
@@ -348,9 +360,17 @@ async function restartStudio() {
   try {
     await api("/api/restart", { method: "POST" });
   } catch (error) {
-    // A restart tears down the connection carrying its own response, so a
-    // transport error here is expected rather than a failure.
-    if (error.status && error.status !== 401) {
+    // A 401 means the request was never authorized, so nothing restarted —
+    // waiting for a server that was never asked to go down is a dead end, and
+    // it is what left this overlay spinning forever. `api` has already raised
+    // the sign-in card; get out of its way.
+    if (error.status === 401) {
+      elements.restartOverlay.classList.add("hidden");
+      return;
+    }
+    // Any other definite HTTP status is a real refusal, not the connection
+    // being torn down under its own response.
+    if (error.status) {
       elements.restartOverlay.classList.add("hidden");
       showToast(error.message, "error");
       return;
@@ -360,20 +380,29 @@ async function restartStudio() {
   const deadline = Date.now() + 60_000;
   while (Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 700));
+    let probe;
     try {
-      const probe = await fetch("/api/ping", { cache: "no-store" });
-      const body = await probe.json();
-      if (body?.app === "claude-cli-studio") {
-        elements.restartStatus.textContent = "Back up. Reloading…";
-        window.location.reload();
-        return;
-      }
+      probe = await fetch("/api/ping", { cache: "no-store" });
     } catch {
-      // Still down; keep waiting.
+      // Genuinely down mid-restart; keep waiting.
+      continue;
     }
+    const body = await probe.json().catch(() => null);
+    if (body?.app === "claude-cli-studio") {
+      elements.restartStatus.textContent = "Back up. Reloading…";
+      window.location.reload();
+      return;
+    }
+    // Something answered but it is not a Studio that knows this route — an
+    // older build still holding the port. Waiting will not change that.
+    elements.restartStatus.textContent =
+      "The server on this port is not the Studio this page came from. Close the launcher window, start Claude Studio again, then reload.";
+    elements.restartReload.classList.remove("hidden");
+    return;
   }
   elements.restartStatus.textContent =
     "Studio has not come back. Check the launcher window, then reload this page.";
+  elements.restartReload.classList.remove("hidden");
 }
 
 elements.restartButton?.addEventListener("click", () => {
@@ -2082,6 +2111,14 @@ async function connectEventStream() {
         cache: "no-store",
         headers: studioToken ? { Authorization: `Bearer ${studioToken}` } : {},
       });
+      // A 401 is not a transport hiccup and retrying cannot fix it: the token
+      // is dead and only a fresh launch can mint another. Retrying anyway is
+      // what filled the console with hundreds of silent 401s while the page
+      // sat there looking merely disconnected.
+      if (response.status === 401) {
+        showSigninOverlay("This tab's token no longer matches the running Studio.");
+        return;
+      }
       if (!response.ok || !response.body) {
         throw new Error(`Event stream failed with status ${response.status}.`);
       }

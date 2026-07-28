@@ -194,6 +194,18 @@ launch nonce) is written only after `listen` succeeds so a loser never clobbers
 the winner, and stale `launch-<pid>` directories from killed servers are pruned
 at startup.
 
+**A 401 is never a retry.** The token cannot be re-minted from the browser, so
+retrying is guaranteed to fail forever — it must raise `#signinOverlay`
+instead. Two places got this wrong and both stranded the user with no
+explanation: `connectEventStream` retried `/api/events` on 401 in an infinite
+backoff loop (hundreds of silent console errors while the page merely looked
+"disconnected"), and `restartStudio` treated a 401 on `POST /api/restart` as
+"the connection dropped because we are restarting" and then waited for a
+server that had never been asked to go down. A stale tab against a *live*
+server is the common case here, not an exotic one: `serveStatic` reads from
+disk per request, so an old server process happily serves the newest `app.js`
+— the UI can be newer than the server backing it.
+
 `POST /api/restart` restarts the server from the sidebar button. It answers
 **before** tearing down, since the response rides a connection it is about to
 close and the browser needs the 202 to start polling the unauthenticated

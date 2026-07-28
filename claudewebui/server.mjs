@@ -1524,7 +1524,22 @@ async function restartStudio() {
     },
     stdio: "inherit",
   });
-  child.on("exit", (code) => process.exit(code ?? 0));
+
+  // Without this handler a failed spawn raises an unhandled 'error' event,
+  // which kills this process with a stack trace — the browser is left polling
+  // a port nothing will ever answer on, with no clue why.
+  const stranded = (reason) => {
+    console.error(`\nStudio could not restart: ${reason}`);
+    console.error("Close this window and start Claude Studio again.");
+    process.exit(1);
+  };
+  child.on("error", (error) => stranded(error.message));
+  child.on("exit", (code) => {
+    if (code) {
+      stranded(`the replacement exited with code ${code}`);
+    }
+    process.exit(0);
+  });
 }
 
 process.on("SIGINT", async () => {
