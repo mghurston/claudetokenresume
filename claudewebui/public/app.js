@@ -195,7 +195,19 @@ async function api(url, options = {}) {
       ...(options.headers || {}),
     },
   };
-  const response = await fetch(url, requestOptions);
+  let response;
+  try {
+    response = await fetch(url, requestOptions);
+  } catch {
+    // fetch only rejects when the request never completed, and on loopback
+    // that means the server is gone. "Failed to fetch" tells the user nothing.
+    setServerUnreachable();
+    const error = new Error(
+      "Studio's server isn't running. Start Claude Studio again, then use the tab it opens.",
+    );
+    error.offline = true;
+    throw error;
+  }
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
     if (response.status === 401) {
@@ -210,6 +222,17 @@ async function api(url, options = {}) {
     throw error;
   }
   return payload;
+}
+
+/**
+ * Says the server is gone, rather than leaving the page looking merely idle.
+ * A dimmed status dot is far too quiet for "nothing you do will work".
+ */
+function setServerUnreachable() {
+  elements.statusDot.classList.remove("connected");
+  elements.statusDot.classList.add("error");
+  elements.connectionLabel.textContent = "Studio's server is not running";
+  elements.connectionDetail.textContent = "Start Claude Studio again";
 }
 
 /**
@@ -2105,6 +2128,7 @@ function handleSseFrame(frame) {
 
 async function connectEventStream() {
   let retryDelay = 500;
+  let failures = 0;
   while (true) {
     try {
       const response = await fetch("/api/events", {
@@ -2123,6 +2147,7 @@ async function connectEventStream() {
         throw new Error(`Event stream failed with status ${response.status}.`);
       }
       retryDelay = 500;
+      failures = 0;
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
@@ -2140,6 +2165,12 @@ async function connectEventStream() {
       }
     } catch {
       elements.statusDot.classList.remove("connected");
+      // A blip is worth retrying quietly; a server that stays gone is not, and
+      // the page should stop pretending it is merely between reconnects.
+      failures += 1;
+      if (failures >= 3) {
+        setServerUnreachable();
+      }
       await new Promise((resolve) => setTimeout(resolve, retryDelay));
       retryDelay = Math.min(retryDelay * 2, 5000);
     } finally {
