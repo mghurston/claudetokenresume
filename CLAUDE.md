@@ -4,16 +4,28 @@ Guidance for working on this repo (Claude Token Resume / "Claude Watch").
 
 ## What this project is
 
-A small, dependency-free **Windows** utility that waits out the Claude Code
-**usage-limit cooldown** and then **auto-continues** the user's work by reopening
-each session in its own **visible terminal** (`claude --resume <id>`), with
-desktop toast + sound notifications. The user can arm it *before* hitting the cap
-(it stays armed and keeps polling); it detects when the rolling usage window
-resets and resumes the selected project(s) in windows the user can watch / drive.
+**Two** tools that solve the same problem — Claude Code stopping at a usage
+limit — sharing one cap-detection model:
 
-This is a personal tool, not a library. Prioritize: it must never act
-surprisingly (no runaway autonomous runs), the GUI must never freeze, and it
-must never interfere with the user's real interactive Claude Code sessions.
+1. **Claude Watch** (`claude-watch-ui.ps1`) — a small, dependency-free
+   **Windows** WinForms utility that waits out the **usage-limit cooldown** and
+   **auto-continues** the user's work by reopening each session in its own
+   **visible terminal** (`claude --resume <id>`), with toast + sound. The user
+   can arm it *before* hitting the cap (it stays armed and keeps polling); it
+   detects when the window resets and resumes the selected project(s) in windows
+   the user can watch and drive.
+2. **Claude CLI Studio** (`claudewebui/`) — a local, cross-platform **web UI**
+   for Claude Code on the Agent SDK, carrying its own copy of the watch. A
+   parked turn is released into the conversation already open in the browser.
+
+These are personal tools, not libraries. Prioritize: never act surprisingly (no
+runaway autonomous runs), never freeze the UI, and never interfere with the
+user's real interactive Claude Code sessions.
+
+**The audience is not necessarily technical.** Both are launched by
+double-clicking an icon. Any failure whose only exit is "open a terminal and
+run…" is a bug — see the port-conflict and Restart notes below for the shape of
+the fix that is expected here.
 
 ## How it works (the important mental model)
 
@@ -55,9 +67,10 @@ must never interfere with the user's real interactive Claude Code sessions.
 | `claude-watch-ui.ps1` | WinForms GUI — the main tool |
 | `Claude Watch.cmd` | Double-click launcher (`%~dp0`-relative; rename-safe) |
 | `CLAUDE.md` / `README.md` | Docs |
-| `logs/` | Resume run output — git-ignored, may contain session content |
+| `logs/` | Generated `resume-*.cmd` launchers — git-ignored, embed the wake prompt |
 | `claudewebui/` | Claude CLI Studio — the web UI, with its own copy of the watch |
 | `Claude Studio.cmd` / `.command` | Double-click launchers for Studio (Windows / macOS) |
+| `.gitattributes` | Pins `*.cmd`/`*.bat` to CRLF and `*.command`/`*.sh` to LF |
 
 ## Architecture of the GUI (`claude-watch-ui.ps1`)
 
@@ -234,8 +247,7 @@ file contents. The text field stays alongside Browse — the picker is an
 addition, not a replacement. A path that fails to resolve must fall back to the
 drive list, or the dialog is a dead end with nothing to click.
 
-**The audience double-clicks an icon.** Anything that would otherwise end in
-"open a terminal and run…" is a bug. `probePortHolder` classifies the port
+`probePortHolder` classifies the port
 holder three ways: `current` (answers `/api/ping`), `legacy` (an older Studio —
 `/api/ping` predates it, so the request falls to the auth gate and 401s with
 Studio's own wording; this is the upgrade case and it must keep working), and

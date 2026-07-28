@@ -21,6 +21,9 @@ reimplements.
 - Model and effort pickers, per message
 - Queue a message to send itself when your usage limit resets
 - Live 5-hour and weekly usage meter in the sidebar
+- Slash commands, including `/login` and `/whoami` for your Claude account
+- Browse to project folders instead of typing absolute paths
+- Restart the server from the sidebar, without touching a terminal
 - Rename and delete sessions — both write through to the real transcript
 - Light/dark themes, responsive layout
 
@@ -75,6 +78,18 @@ Sessions are grouped by the folder they ran in:
 Discovery is deliberately bounded by scan roots. Studio does not crawl your
 filesystem; it only groups working directories already recorded in your own
 Claude Code history.
+
+## Choosing folders
+
+Anywhere Studio asks for a folder — **Scan local folder** and **Add project** —
+type the path or hit **Browse…** and walk there: pick Home or a drive,
+double-click down through the folders, then **Use this folder**.
+
+Browsing is served by Studio itself, because a browser cannot hand back a real
+absolute path (`showDirectoryPicker` gives a handle with only a name, and a
+directory file input gives relative paths). The picker lists directory names
+only, never file contents, and it sits behind the same session token as the
+rest of the API.
 
 ## Permissions
 
@@ -209,24 +224,15 @@ the terminal.
 | `CLAUDE_STUDIO_DATA_DIR` | Studio state and upload directory |
 | `CLAUDE_STUDIO_OPEN=0` | Do not open the browser automatically |
 | `CLAUDE_STUDIO_TOKEN` | Advanced: fixed launch nonce when browser opening is disabled |
-| `CLAUDE_CODE_PATH` | Claude Code executable used for the version check |
-
 | `CLAUDE_STUDIO_ON_CONFLICT` | Answer the port-conflict prompt without a console: `open`, `restart`, `port`, or `fail` |
+| `CLAUDE_CODE_PATH` | Claude Code executable used for the version check |
 
 With `CLAUDE_STUDIO_OPEN=0`, Studio prints the path to a mode-`0600` launch
 file. Open it in the intended browser; it stays valid until the server stops.
 
-## Choosing folders
-
-Anywhere Studio asks for a folder — **Scan local folder** and **Add project** —
-you can either type the path or hit **Browse…** and walk there: pick Home or a
-drive, double-click down through the folders, then **Use this folder**.
-
-Browsing is served by Studio itself, because a browser cannot hand back a real
-absolute path (`showDirectoryPicker` gives a handle with only a name, and a
-directory file input gives relative paths). The picker lists directory names
-only, never file contents, and it sits behind the same session token as the
-rest of the API.
+`CLAUDE_STUDIO_SESSION_TOKEN` and `CLAUDE_STUDIO_RESTARTED` are set by Studio on
+itself when you use the Restart button, so the tab that asked for it stays
+signed in. Do not set them by hand.
 
 ## Restarting Studio
 
@@ -262,17 +268,41 @@ identify as Studio, because that could be a database or someone's dev server.
 When nothing is attached to answer (a service, a CI run), it falls back to
 opening the running Studio, or exits with an explanation.
 
+## Troubleshooting
+
+**"This tab isn't signed in to Studio"** — the tab is holding a token from an
+earlier run of the server. Studio hands each browser a token when it launches,
+and a restarted server issues a new one. Start **Claude Studio** again; if the
+server is still running it opens a fresh, signed-in tab rather than starting a
+second copy. Keep working in *that* tab.
+
+This is also what to expect after updating Studio: the page is served from disk
+on every request, so a running server happily serves a newer UI than itself. If
+the sidebar shows features the server does not have, restart it.
+
+**The launcher window flashes and closes** — it should not; it pauses on every
+exit path. If it does, the batch file has lost its CRLF line endings (`cmd.exe`
+mis-parses `goto` with LF). `.gitattributes` pins them.
+
+**Restart says Studio has not come back** — check the launcher window; it prints
+why the replacement could not start. **Reload now** in the dialog gets you back
+to a working page once it is up.
+
 ## Architecture
 
 | File | Role |
 | --- | --- |
-| `server.mjs` | HTTP API, SSE event stream, launch-token auth |
-| `src/claude-bridge.mjs` | Long-lived `query()` per session, streaming input, permissions |
+| `server.mjs` | HTTP API, SSE event stream, launch-token auth, folder browsing, restart |
+| `src/claude-bridge.mjs` | Long-lived `query()` per session, streaming input, permissions, `/login` |
 | `src/session-catalog.mjs` | Reads and normalizes Claude Code transcripts |
 | `src/project-catalog.mjs` | Groups sessions into project folders |
 | `src/state-store.mjs` | Scan roots, pinned projects, manual moves |
 | `src/upload-store.mjs` | Attachment staging and content-block conversion |
 | `src/permission-decisions.mjs` | Studio choice → SDK `PermissionResult` |
+| `src/limit-watch.mjs` | Plan-limit state, from the SDK feed or its own probe |
+| `src/turn-queue.mjs` | Turns parked for the reset, one per session |
+| `src/model-info.mjs` | Known models, effort levels, permission modes |
+| `src/http-utils.mjs` | Static serving, JSON helpers, security headers |
 | `public/` | The UI (no build step, no framework) |
 
 One `SessionRunner` wraps one long-lived `query()` in streaming-input mode. That
@@ -285,6 +315,7 @@ keeps the CLI warm between turns and is the only mode where `interrupt()` and
 npm test
 ```
 
-52 tests covering transcript normalization, permission mapping, project
-grouping, state persistence, attachment conversion, and the message queue that
-turns a one-shot query into a multi-turn conversation.
+83 tests covering transcript normalization, permission mapping, project
+grouping, state persistence, attachment conversion, cap classification, the
+parked-turn queue, the account login guards, and the message queue that turns a
+one-shot query into a multi-turn conversation.
