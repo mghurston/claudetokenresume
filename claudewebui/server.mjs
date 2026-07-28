@@ -1,7 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { existsSync, realpathSync, statSync } from "node:fs";
-import { chmod, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -610,6 +610,63 @@ function canonicalDirectory(candidate) {
 }
 
 /**
+ * The starting points for browsing: home, plus every drive that answers.
+ *
+ * A browser cannot hand back a real absolute path — `showDirectoryPicker`
+ * gives a handle with only a name, and a file input gives relative paths — so
+ * a local app that needs a real path has to do the walking server-side.
+ */
+async function browseRoots() {
+  const home = { name: "Home", path: os.homedir() };
+  if (process.platform !== "win32") {
+    return [home, { name: "/", path: "/" }];
+  }
+  // Probed in parallel: a disconnected network drive can take a while to
+  // answer, and there is no reason to let it hold up the others.
+  const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("");
+  const drives = await Promise.all(
+    letters.map(async (letter) => {
+      const root = `${letter}:\\`;
+      try {
+        return (await stat(root)).isDirectory() ? { name: root, path: root } : null;
+      } catch {
+        return null;
+      }
+    }),
+  );
+  return [home, ...drives.filter(Boolean)];
+}
+
+/** Sub-directories of `directory`, for the folder picker. */
+async function browseDirectory(directory) {
+  const entries = await readdir(directory, { withFileTypes: true });
+  const folders = [];
+  for (const entry of entries) {
+    // Windows puts machine-level bookkeeping at drive roots that nobody is
+    // ever picking as a project folder.
+    if (entry.name.startsWith("$") || entry.name === "System Volume Information") {
+      continue;
+    }
+    if (!entry.isDirectory() && !entry.isSymbolicLink()) {
+      continue;
+    }
+    const full = path.join(directory, entry.name);
+    if (entry.isSymbolicLink()) {
+      try {
+        if (!(await stat(full)).isDirectory()) {
+          continue;
+        }
+      } catch {
+        continue;
+      }
+    }
+    folders.push({ name: entry.name, path: full });
+  }
+  folders.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
+  return folders;
+}
+
+/**
  * Blocks scanning a root that would swallow the whole machine — `/` or the
  * drive holding the home directory. A separate projects drive (`D:\`, `G:\`)
  * is a legitimate scan root and stays allowed.
@@ -778,6 +835,40 @@ async function handleApi(request, response, url) {
 
   if (request.method === "GET" && url.pathname === "/api/events") {
     beginEventStream(request, response);
+    return true;
+  }
+
+  // Backs the folder picker. Listing directory names is well inside what this
+  // authenticated loopback client can already do — it reads your transcripts
+  // and drives a Claude session with tool access — and it never returns files.
+  if (request.method === "GET" && url.pathname === "/api/browse") {
+    const requested = url.searchParams.get("path");
+    const roots = await browseRoots();
+    if (!requested) {
+      json(response, 200, { path: null, parent: null, roots, folders: [] });
+      return true;
+    }
+    const directory = canonicalDirectory(requested);
+    if (!directory) {
+      json(response, 404, { error: "That folder does not exist." });
+      return true;
+    }
+    try {
+      const parent = path.dirname(directory);
+      json(response, 200, {
+        path: directory,
+        parent: parent === directory ? null : parent,
+        roots,
+        folders: await browseDirectory(directory),
+      });
+    } catch (error) {
+      json(response, 403, {
+        error:
+          error.code === "EPERM" || error.code === "EACCES"
+            ? "Windows will not let Studio read that folder."
+            : `Could not read that folder: ${error.message}`,
+      });
+    }
     return true;
   }
 

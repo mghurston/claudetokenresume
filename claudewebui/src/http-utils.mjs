@@ -89,7 +89,12 @@ export async function serveStatic(response, publicDirectory, pathname) {
     const body = await readFile(filePath);
     applySecurityHeaders(response);
     response.writeHead(200, {
-      "Cache-Control": requested === "index.html" ? "no-cache" : "public, max-age=300",
+      // Everything revalidates, not just index.html. `max-age=300` on the
+      // scripts meant an updated Studio kept serving the old app.js for up to
+      // five minutes — which quietly defeats the Restart button, since you
+      // restart precisely to pick up a new version. Revalidation is free over
+      // loopback.
+      "Cache-Control": "no-cache",
       "Content-Type": CONTENT_TYPES[path.extname(filePath)] || "application/octet-stream",
     });
     response.end(body);

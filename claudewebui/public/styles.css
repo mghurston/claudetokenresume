@@ -1349,6 +1349,99 @@ button.composer-control {
   text-decoration: none;
 }
 
+.path-field {
+  display: flex;
+  gap: 8px;
+}
+
+.path-field input {
+  flex: 1;
+  min-width: 0;
+}
+
+.browse-roots {
+  display: flex;
+  flex-wrap: wrap;
+  margin-top: 14px;
+  gap: 6px;
+}
+
+.browse-root {
+  min-height: 28px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+.browse-current {
+  display: flex;
+  align-items: center;
+  margin-top: 12px;
+  gap: 8px;
+}
+
+.browse-current code {
+  overflow: hidden;
+  flex: 1;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.browse-list {
+  overflow-y: auto;
+  max-height: 40vh;
+  min-height: 160px;
+  margin: 10px 0 0;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  list-style: none;
+}
+
+.browse-entry {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  gap: 9px;
+  text-align: left;
+}
+
+.browse-entry:hover,
+.browse-entry:focus-visible {
+  background: var(--surface-raised);
+}
+
+.browse-entry svg {
+  width: 16px;
+  flex: none;
+  opacity: 0.7;
+}
+
+.browse-empty,
+.browse-error {
+  padding: 12px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.browse-error {
+  margin: 10px 0 0;
+  color: var(--danger, #d33);
+}
+
 .restart-warning {
   margin: 14px 0 0;
   padding: 10px 12px;

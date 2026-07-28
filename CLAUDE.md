@@ -207,6 +207,21 @@ stops it opening a second browser tab. `shutdown()` has to `end()` the SSE
 clients and `closeAllConnections()` first or `server.close()` never resolves
 and the port is never freed.
 
+Static assets are served `no-cache` (revalidate), **not** `max-age`. They used
+to be `public, max-age=300`, which meant an upgraded Studio kept serving the
+old `app.js` for five minutes — silently defeating the Restart button, since
+that is exactly when you restart. Revalidation is free over loopback.
+
+`GET /api/browse` backs the folder picker behind every "folder path" field.
+**A browser cannot produce an absolute path** — `showDirectoryPicker` returns a
+handle carrying only a name, and a `webkitdirectory` input returns relative
+paths — so a local app that needs a real path has to walk the tree server-side.
+`browseRoots` probes drive letters in parallel (a disconnected network drive
+can stall for seconds); `browseDirectory` returns directory names only, never
+file contents. The text field stays alongside Browse — the picker is an
+addition, not a replacement. A path that fails to resolve must fall back to the
+drive list, or the dialog is a dead end with nothing to click.
+
 **The audience double-clicks an icon.** Anything that would otherwise end in
 "open a terminal and run…" is a bug. `probePortHolder` classifies the port
 holder three ways: `current` (answers `/api/ping`), `legacy` (an older Studio —

@@ -64,6 +64,14 @@ const elements = {
   deleteButton: document.querySelector("#deleteButton"),
   denyPermissionButton: document.querySelector("#denyPermissionButton"),
   dropOverlay: document.querySelector("#dropOverlay"),
+  browseChoose: document.querySelector("#browseChoose"),
+  browseDialog: document.querySelector("#browseDialog"),
+  browseError: document.querySelector("#browseError"),
+  browseForm: document.querySelector("#browseForm"),
+  browseList: document.querySelector("#browseList"),
+  browsePath: document.querySelector("#browsePath"),
+  browseRoots: document.querySelector("#browseRoots"),
+  browseUp: document.querySelector("#browseUp"),
   restartButton: document.querySelector("#restartButton"),
   restartConfirm: document.querySelector("#restartConfirm"),
   restartDialog: document.querySelector("#restartDialog"),
@@ -220,6 +228,110 @@ function showSigninOverlay(reason) {
 
 elements.signinRetry?.addEventListener("click", () => {
   window.location.reload();
+});
+
+/**
+ * A folder picker that walks the real filesystem.
+ *
+ * Typing an absolute path from memory is a poor ask, and the browser cannot
+ * help: `showDirectoryPicker` yields a handle with only a name, and a
+ * directory file input yields relative paths. Neither can produce the absolute
+ * path the server needs. So the server lists directories and this walks them.
+ * The text field stays — browsing is the addition, not the replacement.
+ */
+const browseState = { target: null, path: null, parent: null };
+
+function browseEntryNode(label, targetPath, { isFolder = true } = {}) {
+  const item = document.createElement("li");
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "browse-entry";
+  if (isFolder) {
+    button.append(iconNode("folder"));
+  }
+  const text = document.createElement("span");
+  text.textContent = label;
+  button.append(text);
+  button.addEventListener("click", () => loadBrowseDirectory(targetPath));
+  item.append(button);
+  return item;
+}
+
+async function loadBrowseDirectory(directory) {
+  elements.browseError.classList.add("hidden");
+  let payload;
+  try {
+    payload = await api(
+      `/api/browse${directory ? `?path=${encodeURIComponent(directory)}` : ""}`,
+    );
+  } catch (error) {
+    elements.browseError.textContent = error.message;
+    elements.browseError.classList.remove("hidden");
+    // A path that does not resolve must not leave a dialog with nothing in it.
+    // Fall back to the drive list so there is always somewhere to go next.
+    if (directory) {
+      await loadBrowseDirectory(null);
+      elements.browseError.textContent = error.message;
+      elements.browseError.classList.remove("hidden");
+    }
+    return;
+  }
+
+  browseState.path = payload.path;
+  browseState.parent = payload.parent;
+  elements.browsePath.textContent = payload.path || "Select a drive to start";
+  elements.browseChoose.disabled = !payload.path;
+  elements.browseUp.disabled = !payload.parent;
+
+  elements.browseRoots.replaceChildren();
+  for (const root of payload.roots) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "button secondary browse-root";
+    button.textContent = root.name;
+    button.addEventListener("click", () => loadBrowseDirectory(root.path));
+    elements.browseRoots.append(button);
+  }
+
+  elements.browseList.replaceChildren();
+  if (payload.parent) {
+    elements.browseList.append(browseEntryNode("..", payload.parent, { isFolder: false }));
+  }
+  for (const folder of payload.folders) {
+    elements.browseList.append(browseEntryNode(folder.name, folder.path));
+  }
+  if (payload.path && payload.folders.length === 0) {
+    const empty = document.createElement("li");
+    empty.className = "browse-empty";
+    empty.textContent = "No sub-folders here. You can still use this one.";
+    elements.browseList.append(empty);
+  }
+  elements.browseList.scrollTop = 0;
+}
+
+document.querySelectorAll("[data-browse-for]").forEach((button) => {
+  button.addEventListener("click", () => {
+    browseState.target = document.querySelector(`#${button.dataset.browseFor}`);
+    elements.browseDialog.showModal();
+    // Start where the field already points, so reopening resumes rather than
+    // sending you back to the drive list.
+    loadBrowseDirectory(browseState.target?.value.trim() || null);
+  });
+});
+
+// The server decides what "up" means — a drive root has no parent, and
+// re-deriving it from the string would get that wrong on Windows.
+elements.browseUp?.addEventListener("click", () => {
+  loadBrowseDirectory(browseState.parent);
+});
+
+elements.browseForm?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (browseState.path && browseState.target) {
+    browseState.target.value = browseState.path;
+    browseState.target.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  elements.browseDialog.close();
 });
 
 /**

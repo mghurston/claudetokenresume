@@ -261,6 +261,32 @@
       </div>
     </div>
 
+    <dialog id="browseDialog" class="studio-dialog">
+      <form method="dialog" id="browseForm">
+        <header>
+          <div>
+            <h2>Choose a folder</h2>
+            <p>Pick a drive, then double-click your way down to the folder you want.</p>
+          </div>
+        </header>
+        <div class="browse-roots" id="browseRoots"></div>
+        <div class="browse-current">
+          <button class="button secondary" type="button" id="browseUp" title="Go up one level">
+            Up
+          </button>
+          <code id="browsePath">Select a drive to start</code>
+        </div>
+        <ul class="browse-list" id="browseList"></ul>
+        <p class="browse-error hidden" id="browseError"></p>
+        <footer>
+          <button class="button secondary" type="button" data-close-dialog>Cancel</button>
+          <button class="button primary" type="submit" id="browseChoose" disabled>
+            Use this folder
+          </button>
+        </footer>
+      </form>
+    </dialog>
+
     <dialog id="restartDialog" class="studio-dialog compact-dialog">
       <form method="dialog" id="restartForm">
         <header>
@@ -365,8 +391,13 @@
           </div>
         </header>
         <label class="feedback-field">
-          Absolute folder path
-          <input id="scanPathInput" type="text" autocomplete="off">
+          Folder path
+          <span class="path-field">
+            <input id="scanPathInput" type="text" autocomplete="off" placeholder="Type a path, or browse…">
+            <button class="button secondary" type="button" data-browse-for="scanPathInput">
+              Browse…
+            </button>
+          </span>
         </label>
         <footer>
           <button class="button secondary" type="button" data-close-dialog>Cancel</button>
@@ -388,8 +419,13 @@
           <input id="projectNameInput" type="text" maxlength="80" autocomplete="off">
         </label>
         <label class="feedback-field">
-          Absolute folder path
-          <input id="projectPathInput" type="text" autocomplete="off">
+          Folder path
+          <span class="path-field">
+            <input id="projectPathInput" type="text" autocomplete="off" placeholder="Type a path, or browse…">
+            <button class="button secondary" type="button" data-browse-for="projectPathInput">
+              Browse…
+            </button>
+          </span>
         </label>
         <label class="feedback-field">
           Matching keywords <span>(comma-separated, optional)</span>

@@ -216,6 +216,18 @@ the terminal.
 With `CLAUDE_STUDIO_OPEN=0`, Studio prints the path to a mode-`0600` launch
 file. Open it in the intended browser; it stays valid until the server stops.
 
+## Choosing folders
+
+Anywhere Studio asks for a folder — **Scan local folder** and **Add project** —
+you can either type the path or hit **Browse…** and walk there: pick Home or a
+drive, double-click down through the folders, then **Use this folder**.
+
+Browsing is served by Studio itself, because a browser cannot hand back a real
+absolute path (`showDirectoryPicker` gives a handle with only a name, and a
+directory file input gives relative paths). The picker lists directory names
+only, never file contents, and it sits behind the same session token as the
+rest of the API.
+
 ## Restarting Studio
 
 The circular-arrow button in the sidebar footer restarts Studio's server
