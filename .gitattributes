@@ -1,0 +1,8 @@
+# Windows batch files must have CRLF endings. With LF, cmd.exe mis-parses
+# labels and goto, so a launcher opens and closes again with no message.
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Shell scripts must keep LF, including the macOS double-click launcher.
+*.sh text eol=lf
+*.command text eol=lf

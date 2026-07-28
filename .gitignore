@@ -3,3 +3,6 @@ logs/
 
 # Your personal list of watched project paths
 projects.txt
+
+# Local scratch copy of the UI this one was ported from — never commit
+webuiforcli/
