@@ -211,11 +211,35 @@ the terminal.
 | `CLAUDE_STUDIO_TOKEN` | Advanced: fixed launch nonce when browser opening is disabled |
 | `CLAUDE_CODE_PATH` | Claude Code executable used for the version check |
 
+| `CLAUDE_STUDIO_ON_CONFLICT` | Answer the port-conflict prompt without a console: `open`, `restart`, `port`, or `fail` |
+
 With `CLAUDE_STUDIO_OPEN=0`, Studio prints the path to a mode-`0600` launch
 file. Open it in the intended browser; it stays valid until the server stops.
 
-Starting Studio a second time while one is already running does not fail —
-it opens the running one in your browser and exits.
+## If the port is already in use
+
+Starting Studio a second time never fails with a stack trace. It works out
+what is holding the port and asks:
+
+```
+Claude CLI Studio is already running on port 4174 (node.exe, pid 20072).
+
+What would you like to do?
+
+  [O] Open the one already running  (press Enter)
+  [R] Close it and start this version instead
+  [Q] Quit
+```
+
+Pick **R** after updating Studio and it closes the old one and takes over — no
+Task Manager, no terminal.
+
+If the port belongs to some *other* program, Studio says what it is and offers
+to start on the next free port instead. It will not stop a program it could not
+identify as Studio, because that could be a database or someone's dev server.
+
+When nothing is attached to answer (a service, a CI run), it falls back to
+opening the running Studio, or exits with an explanation.
 
 ## Architecture
 

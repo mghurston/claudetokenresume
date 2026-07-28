@@ -118,10 +118,82 @@ async function writeRuntimeFile() {
 }
 
 /**
- * Resolves the running Studio on our port, or null. Confirms it is really
- * Studio (and still alive) rather than trusting a possibly stale file.
+ * Asks whatever holds our port what it is.
+ *
+ * `current` — this build, which answers /api/ping.
+ * `legacy`  — an older Studio: /api/ping predates it, so the request falls
+ *             through to the auth gate and 401s with Studio's own wording.
+ *             Worth recognising, because upgrading is exactly when someone
+ *             double-clicks the launcher while the old one is still up.
+ * `foreign` — HTTP, but not us. Never killed automatically.
  */
-async function describeRunningStudio() {
+async function probePortHolder() {
+  let response;
+  try {
+    response = await fetch(new URL("/api/ping", EXPECTED_ORIGIN), {
+      signal: AbortSignal.timeout(2500),
+    });
+  } catch {
+    return "foreign";
+  }
+  const body = await response.json().catch(() => null);
+  if (body?.app === "claude-cli-studio") {
+    return "current";
+  }
+  if (response.status === 401 && /Studio authentication/i.test(body?.error || "")) {
+    return "legacy";
+  }
+  return "foreign";
+}
+
+/**
+ * The pid listening on our port, plus a human name for it.
+ *
+ * Only used to tell the user what they would be stopping, and to stop it once
+ * they say so. A `legacy` Studio predates runtime.json, so asking the OS is
+ * the only way to name it.
+ */
+async function findPortOwner() {
+  try {
+    if (process.platform === "win32") {
+      const { stdout } = await execFileAsync("netstat", ["-ano", "-p", "tcp"], {
+        timeout: 8000,
+        windowsHide: true,
+      });
+      const line = stdout
+        .split(/\r?\n/)
+        .find((row) => /LISTENING/i.test(row) && new RegExp(`[:.]${PORT}\\s`).test(row));
+      const pid = Number(line?.trim().split(/\s+/).pop());
+      if (!Number.isInteger(pid) || pid <= 0) {
+        return null;
+      }
+      const { stdout: task } = await execFileAsync(
+        "tasklist",
+        ["/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"],
+        { timeout: 8000, windowsHide: true },
+      );
+      return { pid, name: task.split(",")[0]?.replace(/"/g, "").trim() || "unknown" };
+    }
+    const { stdout } = await execFileAsync(
+      "lsof",
+      ["-nP", `-iTCP:${PORT}`, "-sTCP:LISTEN", "-t"],
+      { timeout: 8000 },
+    );
+    const pid = Number(stdout.trim().split(/\s+/)[0]);
+    if (!Number.isInteger(pid) || pid <= 0) {
+      return null;
+    }
+    const { stdout: name } = await execFileAsync("ps", ["-p", String(pid), "-o", "comm="], {
+      timeout: 8000,
+    });
+    return { pid, name: name.trim() || "unknown" };
+  } catch {
+    return null;
+  }
+}
+
+/** The launch URL of the running Studio, when it left a readable record. */
+async function runningStudioLaunchHref() {
   let record;
   try {
     record = JSON.parse(await readFile(RUNTIME_FILE, "utf8"));
@@ -131,21 +203,84 @@ async function describeRunningStudio() {
   if (!record || record.port !== PORT || typeof record.launchToken !== "string") {
     return null;
   }
-  const origin = String(record.origin || EXPECTED_ORIGIN);
+  const href = new URL("/", String(record.origin || EXPECTED_ORIGIN));
+  href.searchParams.set("launch", record.launchToken);
+  return href.href;
+}
+
+/** Stops a process and waits for the port to actually come free. */
+async function stopProcessAndWait(pid) {
   try {
-    const probe = await fetch(new URL("/api/ping", origin), {
-      signal: AbortSignal.timeout(2500),
-    });
-    const body = await probe.json();
-    if (body?.app !== "claude-cli-studio") {
-      return null;
+    process.kill(pid, "SIGTERM");
+  } catch (error) {
+    if (error.code === "ESRCH") {
+      return true;
     }
-  } catch {
+    if (error.code === "EPERM") {
+      return false;
+    }
+  }
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return true;
+    }
+    // Node on Windows treats SIGTERM as a hard kill, so one signal is enough
+    // there; on POSIX a wedged process may need the stronger one.
+    if (attempt === 12 && process.platform !== "win32") {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        /* already gone */
+      }
+    }
+  }
+  return false;
+}
+
+/** The first free port at or after `from`, so a clash needs no env var. */
+async function findFreePort(from) {
+  for (let candidate = from; candidate < from + 25; candidate += 1) {
+    const free = await new Promise((resolve) => {
+      const probe = http.createServer();
+      probe.once("error", () => resolve(false));
+      probe.listen(candidate, HOST, () => probe.close(() => resolve(true)));
+    });
+    if (free) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+/**
+ * Asks the person who double-clicked the launcher what to do. Returns null
+ * when nobody is there to answer — a service, a CI run, an editor's task
+ * runner — so an unattended start never blocks on a prompt.
+ */
+async function askChoice(question, choices) {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
     return null;
   }
-  const href = new URL("/", origin);
-  href.searchParams.set("launch", record.launchToken);
-  return { pid: record.pid, origin, launchHref: href.href };
+  const { createInterface } = await import("node:readline/promises");
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    console.log(`\n${question}\n`);
+    for (const choice of choices) {
+      console.log(`  [${choice.key.toUpperCase()}] ${choice.label}${choice.default ? "  (press Enter)" : ""}`);
+    }
+    const answer = (await rl.question("\nChoose: ")).trim().toLowerCase();
+    if (!answer) {
+      return choices.find((choice) => choice.default)?.key ?? null;
+    }
+    return choices.find((choice) => choice.key === answer)?.key ?? null;
+  } catch {
+    return null;
+  } finally {
+    rl.close();
+  }
 }
 
 /**
@@ -1071,12 +1206,132 @@ function openBrowser(url) {
 }
 
 /**
- * A second launch is a request to *see* Studio, not to run a second copy.
+ * Leaves no launch directory behind on an exit path. The restart path
+ * deliberately does NOT call this — that process goes on to serve, and the
+ * files it already wrote are the ones the browser is about to be sent to.
+ */
+async function exitAfterCleanup(code) {
+  await removeLaunchFiles().catch(() => {});
+  process.exit(code);
+}
+
+/** Restarts this script on another port, keeping the launcher's console. */
+function relaunchOnPort(port) {
+  const child = spawn(process.execPath, [fileURLToPath(import.meta.url)], {
+    env: { ...process.env, CLAUDE_STUDIO_PORT: String(port) },
+    stdio: "inherit",
+  });
+  child.on("exit", (code) => process.exit(code ?? 0));
+}
+
+/**
+ * Decides what a second launch should do about the port being busy.
  *
  * Double-clicking the launcher while one is already up used to die on
  * EADDRINUSE before printing anything useful — the window flashed and closed.
- * Hand the browser to the instance that owns the port and exit happy.
+ * Now it identifies what holds the port and offers the choice, because the
+ * person who double-clicked an icon should never have to open a terminal to
+ * get out of this.
+ *
+ * Stopping a process is only ever offered for something we positively
+ * identified as Studio, and never by default. An unrecognised process gets a
+ * free port instead — taking a guess and killing it could take out a database
+ * or someone's dev server.
  */
+async function resolvePortConflict() {
+  const [holder, owner] = await Promise.all([probePortHolder(), findPortOwner()]);
+  const launchHref = await runningStudioLaunchHref();
+  const ownerLabel = owner ? `${owner.name}, pid ${owner.pid}` : "unidentified process";
+  const preset = (process.env.CLAUDE_STUDIO_ON_CONFLICT || "").trim().toLowerCase();
+  const isStudio = holder === "current" || holder === "legacy";
+
+  if (isStudio) {
+    console.log(
+      `\nClaude CLI Studio is already running on port ${PORT} (${ownerLabel}).` +
+        (holder === "legacy" ? "\nIt is an older version than this one." : ""),
+    );
+    const choices = [];
+    if (launchHref) {
+      choices.push({
+        key: "o",
+        label: "Open the one already running",
+        default: holder === "current",
+      });
+    }
+    if (owner) {
+      choices.push({
+        key: "r",
+        label: "Close it and start this version instead",
+        default: !launchHref,
+      });
+    }
+    choices.push({ key: "q", label: "Quit" });
+
+    const choice =
+      ["open", "restart", "quit"].includes(preset)
+        ? preset[0]
+        : await askChoice("What would you like to do?", choices);
+
+    if (choice === "o" && launchHref) {
+      console.log("Opening the running Studio in your browser.");
+      openBrowser(launchHref);
+      await exitAfterCleanup(0);
+    }
+    if (choice === "r" && owner) {
+      console.log(`Closing the running Studio (pid ${owner.pid})…`);
+      if (!(await stopProcessAndWait(owner.pid))) {
+        console.error("It would not close. Close its window by hand, then try again.");
+        await exitAfterCleanup(1);
+      }
+      console.log("Closed. Starting this version.");
+      server.listen(PORT, HOST);
+      return;
+    }
+    if (choice === "q") {
+      await exitAfterCleanup(0);
+    }
+    // Nobody was there to answer: keep the old unattended behaviour.
+    if (launchHref) {
+      console.log("Opening the running Studio in your browser.");
+      openBrowser(launchHref);
+      await exitAfterCleanup(0);
+    }
+    console.error(`Port ${PORT} is held by Claude CLI Studio, but it could not be opened.`);
+    console.error("Close that window and start Studio again.");
+    await exitAfterCleanup(1);
+  }
+
+  console.log(`\nPort ${PORT} is being used by another program (${ownerLabel}).`);
+  console.log("That is not Claude Studio, so it will be left alone.");
+  const free = await findFreePort(PORT + 1);
+  const choice =
+    ["port", "fail"].includes(preset)
+      ? preset
+      : await askChoice("What would you like to do?", [
+          ...(free
+            ? [{ key: "p", label: `Start Studio on port ${free} instead`, default: true }]
+            : []),
+          { key: "q", label: "Quit" },
+        ]);
+
+  if ((choice === "p" || choice === "port") && free) {
+    console.log(`Starting Studio on port ${free}.`);
+    await removeLaunchFiles().catch(() => {});
+    relaunchOnPort(free);
+    return;
+  }
+  if (choice === "q") {
+    await exitAfterCleanup(0);
+  }
+  console.error(
+    free
+      ? `Set CLAUDE_STUDIO_PORT=${free} to use a free port.`
+      : "Set CLAUDE_STUDIO_PORT to a free port and try again.",
+  );
+  await exitAfterCleanup(1);
+}
+
+let conflictHandled = false;
 server.on("error", async (error) => {
   // Anything else is a genuine failure. Report it and stop — rethrowing from
   // an async handler would only surface as an unhandled rejection.
@@ -1084,19 +1339,12 @@ server.on("error", async (error) => {
     console.error(error);
     process.exit(1);
   }
-  const running = await describeRunningStudio();
-  await removeLaunchFiles().catch(() => {});
-  if (running) {
-    console.log(
-      `Claude CLI Studio is already running at ${running.origin} (pid ${running.pid}).`,
-    );
-    console.log("Opening that one in your browser instead of starting a second.");
-    openBrowser(running.launchHref);
-    process.exit(0);
+  if (conflictHandled) {
+    console.error(`Port ${PORT} is still busy. Nothing further to try.`);
+    process.exit(1);
   }
-  console.error(`Port ${PORT} is already in use by something that is not Studio.`);
-  console.error("Set CLAUDE_STUDIO_PORT to a free port and try again.");
-  process.exit(1);
+  conflictHandled = true;
+  await resolvePortConflict();
 });
 
 server.listen(PORT, HOST, async () => {

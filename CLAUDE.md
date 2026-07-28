@@ -188,12 +188,28 @@ single-use or the expiry.**
 The launcher could not deliver that restart either, because `npm start` hit
 `EADDRINUSE` against the server still holding the port and died before printing
 anything — the "flashes open then closes" symptom, a *different* cause from the
-earlier CRLF bug. `server.on("error")` now resolves the running instance
-through `~/.claude-cli-studio/runtime.json` (pid, port, origin, launch nonce),
-confirms it with the unauthenticated `/api/ping`, opens *that* one in the
-browser and exits 0. `runtime.json` is written only after `listen` succeeds so
-a loser never clobbers the winner, and stale `launch-<pid>` directories from
-killed servers are pruned at startup.
+earlier CRLF bug. `resolvePortConflict` now identifies what holds the port and
+offers the choice in the launcher console. `runtime.json` (pid, port, origin,
+launch nonce) is written only after `listen` succeeds so a loser never clobbers
+the winner, and stale `launch-<pid>` directories from killed servers are pruned
+at startup.
+
+**The audience double-clicks an icon.** Anything that would otherwise end in
+"open a terminal and run…" is a bug. `probePortHolder` classifies the port
+holder three ways: `current` (answers `/api/ping`), `legacy` (an older Studio —
+`/api/ping` predates it, so the request falls to the auth gate and 401s with
+Studio's own wording; this is the upgrade case and it must keep working), and
+`foreign`. Studio + `runtime.json` offers Open / Close-and-replace / Quit;
+`legacy` defaults to replace since there is no nonce to open with.
+
+**Never stop a process that was not positively identified as Studio.** A
+`foreign` holder is named and offered the next free port via `findFreePort` +
+re-exec instead — killing a guess could take out a database or a dev server.
+`askChoice` returns null off a TTY so an unattended start never blocks on a
+prompt, and `CLAUDE_STUDIO_ON_CONFLICT` (`open`/`restart`/`port`/`fail`)
+answers it for automation. Exit paths go through `exitAfterCleanup`; the
+restart path deliberately does not, because that process goes on to serve with
+the launch files it already wrote.
 
 The `SawCap` rule is carried over verbatim and is just as load-bearing here: a
 queued turn is released only after an observed capped -> lifted transition.
