@@ -194,6 +194,19 @@ launch nonce) is written only after `listen` succeeds so a loser never clobbers
 the winner, and stale `launch-<pid>` directories from killed servers are pruned
 at startup.
 
+`POST /api/restart` restarts the server from the sidebar button. It answers
+**before** tearing down, since the response rides a connection it is about to
+close and the browser needs the 202 to start polling the unauthenticated
+`/api/ping`. `restartStudio` carries **both** `LAUNCH_TOKEN` and
+`SESSION_TOKEN` to the replacement through the env — a fresh session token
+would leave the tab that clicked Restart holding a dead one and staring at the
+sign-in card, i.e. the exact lockout this all exists to remove. The replacement
+inherits stdio rather than detaching, so the launcher window still owns it and
+"close this window to stop it" stays true, and `CLAUDE_STUDIO_RESTARTED=1`
+stops it opening a second browser tab. `shutdown()` has to `end()` the SSE
+clients and `closeAllConnections()` first or `server.close()` never resolves
+and the port is never freed.
+
 **The audience double-clicks an icon.** Anything that would otherwise end in
 "open a terminal and run…" is a bug. `probePortHolder` classifies the port
 holder three ways: `current` (answers `/api/ping`), `legacy` (an older Studio —

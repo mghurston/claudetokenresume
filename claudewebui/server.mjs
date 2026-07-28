@@ -44,7 +44,10 @@ const DATA_DIRECTORY = path.resolve(
 );
 const LAUNCH_TOKEN =
   process.env.CLAUDE_STUDIO_TOKEN || randomBytes(32).toString("base64url");
-const SESSION_TOKEN = randomBytes(32).toString("base64url");
+// Inherited only across a Restart, so the tab that asked for it stays signed
+// in. Nothing else should ever set this.
+const SESSION_TOKEN =
+  process.env.CLAUDE_STUDIO_SESSION_TOKEN || randomBytes(32).toString("base64url");
 const URL_HOST = HOST === "::1" ? "[::1]" : HOST;
 const EXPECTED_ORIGIN = `http://${URL_HOST}:${PORT}`;
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
@@ -811,6 +814,19 @@ async function handleApi(request, response, url) {
     return true;
   }
 
+  // Answer before restarting: the response rides a connection this is about to
+  // close, and the browser needs the 202 to start polling /api/ping.
+  if (request.method === "POST" && url.pathname === "/api/restart") {
+    json(response, 202, { restarting: true });
+    setTimeout(() => {
+      restartStudio().catch((error) => {
+        console.error("Restart failed:", error);
+        process.exit(1);
+      });
+    }, 150);
+    return true;
+  }
+
   if (request.method === "POST" && url.pathname === "/api/auth/cancel") {
     claude.cancelLogin();
     json(response, 200, { ok: true });
@@ -1358,7 +1374,11 @@ server.listen(PORT, HOST, async () => {
   } else {
     console.log(`Claude Code CLI not found. ${cli.message}`);
   }
-  if (process.env.CLAUDE_STUDIO_OPEN === "0") {
+  // A restart keeps the tab that asked for it — it reloads itself once this
+  // server answers again — so opening a second one would be a surprise.
+  if (process.env.CLAUDE_STUDIO_RESTARTED === "1") {
+    console.log("Restarted. The tab you clicked Restart in will reconnect itself.");
+  } else if (process.env.CLAUDE_STUDIO_OPEN === "0") {
     console.log(`Browser auto-open is disabled. Open ${LAUNCH_FILE}`);
   } else {
     openBrowser(pathToFileURL(LAUNCH_FILE).href);
@@ -1378,8 +1398,42 @@ async function shutdown() {
   for (const timeout of streamCleanupTimers.values()) {
     clearTimeout(timeout);
   }
-  server.close();
+  // SSE clients hold connections open forever, so close() alone would never
+  // resolve — which matters for restart, where the port has to be free before
+  // the replacement can bind it.
+  for (const client of eventClients) {
+    client.end();
+  }
+  eventClients.clear();
+  server.closeAllConnections?.();
+  await new Promise((resolve) => server.close(resolve));
   await claude.stop();
+}
+
+/**
+ * Replaces this server with a fresh one, in place.
+ *
+ * The point of a Restart button is that the tab you clicked it from keeps
+ * working, so both tokens are carried across: a new session token would leave
+ * that tab holding a dead one and staring at the sign-in card, which is the
+ * lockout this whole change set exists to remove.
+ *
+ * The replacement inherits stdio rather than detaching, so the launcher window
+ * still owns it and "close this window to stop it" stays true.
+ */
+async function restartStudio() {
+  console.log("Restarting at your request…");
+  await shutdown();
+  const child = spawn(process.execPath, [fileURLToPath(import.meta.url)], {
+    env: {
+      ...process.env,
+      CLAUDE_STUDIO_TOKEN: LAUNCH_TOKEN,
+      CLAUDE_STUDIO_SESSION_TOKEN: SESSION_TOKEN,
+      CLAUDE_STUDIO_RESTARTED: "1",
+    },
+    stdio: "inherit",
+  });
+  child.on("exit", (code) => process.exit(code ?? 0));
 }
 
 process.on("SIGINT", async () => {

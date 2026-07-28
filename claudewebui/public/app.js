@@ -64,6 +64,13 @@ const elements = {
   deleteButton: document.querySelector("#deleteButton"),
   denyPermissionButton: document.querySelector("#denyPermissionButton"),
   dropOverlay: document.querySelector("#dropOverlay"),
+  restartButton: document.querySelector("#restartButton"),
+  restartConfirm: document.querySelector("#restartConfirm"),
+  restartDialog: document.querySelector("#restartDialog"),
+  restartForm: document.querySelector("#restartForm"),
+  restartOverlay: document.querySelector("#restartOverlay"),
+  restartStatus: document.querySelector("#restartStatus"),
+  restartWarning: document.querySelector("#restartWarning"),
   signinOverlay: document.querySelector("#signinOverlay"),
   signinReason: document.querySelector("#signinReason"),
   signinRetry: document.querySelector("#signinRetry"),
@@ -213,6 +220,72 @@ function showSigninOverlay(reason) {
 
 elements.signinRetry?.addEventListener("click", () => {
   window.location.reload();
+});
+
+/**
+ * Restarts Studio's server from the UI, so upgrading or clearing a wedged
+ * server never means finding a terminal.
+ *
+ * The server carries both tokens across the restart, so this tab stays signed
+ * in — it only has to wait for the port to answer again and reload. `/api/ping`
+ * is unauthenticated, which is what makes the wait pollable.
+ */
+async function restartStudio() {
+  elements.restartOverlay.classList.remove("hidden");
+  elements.restartStatus.textContent = "Waiting for the server to come back.";
+  try {
+    await api("/api/restart", { method: "POST" });
+  } catch (error) {
+    // A restart tears down the connection carrying its own response, so a
+    // transport error here is expected rather than a failure.
+    if (error.status && error.status !== 401) {
+      elements.restartOverlay.classList.add("hidden");
+      showToast(error.message, "error");
+      return;
+    }
+  }
+
+  const deadline = Date.now() + 60_000;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    try {
+      const probe = await fetch("/api/ping", { cache: "no-store" });
+      const body = await probe.json();
+      if (body?.app === "claude-cli-studio") {
+        elements.restartStatus.textContent = "Back up. Reloading…";
+        window.location.reload();
+        return;
+      }
+    } catch {
+      // Still down; keep waiting.
+    }
+  }
+  elements.restartStatus.textContent =
+    "Studio has not come back. Check the launcher window, then reload this page.";
+}
+
+elements.restartButton?.addEventListener("click", () => {
+  const running = state.runningSessions.size;
+  const queued = state.queue.length;
+  const warnings = [];
+  if (running) {
+    warnings.push(`${running} ${running === 1 ? "turn is" : "turns are"} still running and will be stopped`);
+  }
+  if (queued) {
+    // The queue is deliberately in-memory only, so a restart is where it goes.
+    warnings.push(`${queued} queued ${queued === 1 ? "message" : "messages"} will be discarded`);
+  }
+  elements.restartWarning.textContent = warnings.length
+    ? `${warnings.join(", and ")}.`
+    : "";
+  elements.restartWarning.classList.toggle("hidden", warnings.length === 0);
+  elements.restartDialog.showModal();
+});
+
+elements.restartForm?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  elements.restartDialog.close();
+  restartStudio();
 });
 
 function showToast(message, type = "info") {

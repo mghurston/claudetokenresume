@@ -216,6 +216,15 @@ the terminal.
 With `CLAUDE_STUDIO_OPEN=0`, Studio prints the path to a mode-`0600` launch
 file. Open it in the intended browser; it stays valid until the server stops.
 
+## Restarting Studio
+
+The circular-arrow button in the sidebar footer restarts Studio's server
+without leaving the browser. It confirms first, warning you if a turn is still
+running or messages are queued, then waits for the server and reloads itself.
+
+The tab stays signed in across the restart, and conversations are untouched —
+they live in `~/.claude`, not in Studio.
+
 ## If the port is already in use
 
 Starting Studio a second time never fails with a stack trace. It works out

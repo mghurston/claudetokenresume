@@ -94,6 +94,12 @@
               <small id="connectionDetail">Localhost only</small>
             </span>
           </div>
+          <button class="icon-button" id="restartButton" aria-label="Restart Studio" title="Restart Studio">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M20 12a8 8 0 1 1-2.3-5.6"/>
+              <path d="M20 4v4.5h-4.5"/>
+            </svg>
+          </button>
           <button class="icon-button" id="themeButton" aria-label="Toggle theme">
             <svg class="sun-icon" viewBox="0 0 24 24" aria-hidden="true">
               <circle cx="12" cy="12" r="3.5"/>
@@ -252,6 +258,33 @@
         </svg>
         <strong>Drop files into this conversation</strong>
         <span>Up to 12 files, 30 MB combined</span>
+      </div>
+    </div>
+
+    <dialog id="restartDialog" class="studio-dialog compact-dialog">
+      <form method="dialog" id="restartForm">
+        <header>
+          <div>
+            <h2>Restart Studio?</h2>
+            <p>
+              Studio&rsquo;s server stops and starts again. Conversations are kept
+              &mdash; they live in <code>~/.claude</code> &mdash; and this tab
+              reconnects on its own.
+            </p>
+          </div>
+        </header>
+        <p class="restart-warning hidden" id="restartWarning"></p>
+        <footer>
+          <button class="button secondary" type="button" data-close-dialog>Cancel</button>
+          <button class="button primary" type="submit" id="restartConfirm">Restart</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <div class="signin-overlay hidden" id="restartOverlay">
+      <div class="signin-card">
+        <strong>Restarting Studio&hellip;</strong>
+        <p id="restartStatus">Waiting for the server to come back.</p>
       </div>
     </div>
 
