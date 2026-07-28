@@ -1286,6 +1286,105 @@ button.composer-control {
   font-size: 12px;
 }
 
+.system-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  padding: 16px 18px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-raised);
+}
+
+.system-card strong {
+  font-size: 14px;
+}
+
+.system-card p {
+  margin: 8px 0 0;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.system-card > a,
+.system-card > details {
+  margin-top: 12px;
+}
+
+.system-card-manual summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.system-card-manual a {
+  display: inline-block;
+  margin-top: 8px;
+  font-size: 12px;
+}
+
+.system-card-row {
+  display: flex;
+  margin-top: 8px;
+  gap: 8px;
+}
+
+.system-card-row input {
+  min-width: 220px;
+  flex: 1;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+}
+
+.button-link {
+  display: inline-block;
+  padding: 8px 14px;
+  border-radius: 8px;
+  text-decoration: none;
+}
+
+.signin-overlay {
+  position: fixed;
+  z-index: 120;
+  display: grid;
+  inset: 0;
+  place-items: center;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(10px);
+}
+
+.signin-card {
+  width: min(460px, calc(100% - 40px));
+  padding: 32px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-md);
+}
+
+.signin-card strong {
+  display: block;
+  margin-bottom: 14px;
+  font-size: 16px;
+}
+
+.signin-card p {
+  margin: 0 0 12px;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.signin-card button {
+  margin-top: 8px;
+}
+
 .studio-dialog {
   width: min(620px, calc(100% - 32px));
   padding: 0;
@@ -1590,4 +1689,155 @@ button.composer-control {
 .composer-note.warning {
   color: var(--danger, #d9534f);
   font-weight: 600;
+}
+
+.input-stack {
+  position: relative;
+}
+
+/* Sits behind the textarea, aligned to the same text box, so it reads as the
+   next thing you would type rather than as a separate widget. */
+.ghost-suggestion {
+  position: absolute;
+  z-index: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  /* Matches .composer textarea padding so the text lands on the same baseline. */
+  padding: 17px 18px 8px;
+  color: var(--text-faint);
+  font-size: 14px;
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+.ghost-suggestion span {
+  overflow: hidden;
+  flex: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ghost-suggestion kbd {
+  flex-shrink: 0;
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 10px;
+}
+
+.input-stack textarea {
+  position: relative;
+  z-index: 1;
+  background: transparent;
+}
+
+.message.pending {
+  opacity: 0.62;
+}
+
+.pending-tag {
+  display: inline-block;
+  margin-top: 4px;
+  padding: 1px 6px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+  border-radius: 5px;
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.composer-note.queued {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.link-button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-decoration: underline;
+}
+
+.watch-control.active {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.session-item.has-queued .session-item-meta {
+  padding-right: 52px;
+}
+
+.session-queued-badge {
+  position: absolute;
+  right: 8px;
+  bottom: 7px;
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.limit-meter {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 9px 12px;
+  border-top: 1px solid var(--border);
+}
+
+.limit-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.limit-label {
+  color: var(--text-muted);
+  font-size: 10.5px;
+}
+
+.limit-value {
+  color: var(--text);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.limit-bar {
+  overflow: hidden;
+  height: 4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text) 10%, transparent);
+}
+
+.limit-bar > span {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 0.4s ease;
+}
+
+.limit-meter.capped .limit-bar > span {
+  background: var(--danger);
+}
+
+.limit-meter.capped .limit-label,
+.limit-meter.capped .limit-value {
+  color: var(--danger);
+}
+
+.limit-detail {
+  color: var(--text-faint);
+  font-size: 9.5px;
 }

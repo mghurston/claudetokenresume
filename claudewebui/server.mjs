@@ -1,7 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { existsSync, realpathSync, statSync } from "node:fs";
-import { chmod, mkdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -24,10 +24,12 @@ import {
   modelCatalog,
   permissionModes,
 } from "./src/model-info.mjs";
+import { LimitWatch } from "./src/limit-watch.mjs";
 import { canApproveForSession, permissionResultFor } from "./src/permission-decisions.mjs";
 import { isWithin, ProjectCatalog, slugifyProjectId } from "./src/project-catalog.mjs";
-import { SessionCatalog } from "./src/session-catalog.mjs";
+import { isSessionId, SessionCatalog } from "./src/session-catalog.mjs";
 import { StateStore } from "./src/state-store.mjs";
+import { TurnQueue } from "./src/turn-queue.mjs";
 import { UploadStore } from "./src/upload-store.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -60,8 +62,7 @@ const ALLOWED_ORIGINS = new Set(
 const LAUNCH_DIRECTORY = path.join(DATA_DIRECTORY, `launch-${process.pid}`);
 const LAUNCH_FILE = path.join(LAUNCH_DIRECTORY, "index.html");
 const LAUNCH_SCRIPT = path.join(LAUNCH_DIRECTORY, "launch.js");
-const LAUNCH_EXPIRES_AT = Date.now() + 2 * 60 * 1000;
-let launchAvailable = true;
+const RUNTIME_FILE = path.join(DATA_DIRECTORY, "runtime.json");
 
 await mkdir(DATA_DIRECTORY, { recursive: true, mode: 0o700 });
 await chmod(DATA_DIRECTORY, 0o700);
@@ -83,11 +84,100 @@ function removeLaunchFiles() {
   return rm(LAUNCH_DIRECTORY, { recursive: true, force: true });
 }
 
-const launchExpiryTimer = setTimeout(() => {
-  launchAvailable = false;
-  removeLaunchFiles().catch(() => {});
-}, Math.max(0, LAUNCH_EXPIRES_AT - Date.now()));
-launchExpiryTimer.unref();
+/**
+ * The launch token stays redeemable for as long as the server runs.
+ *
+ * It used to be single-use with a two-minute expiry, which locked you out of
+ * your own Studio: the session token lives in the browser, so closing the tab
+ * (or opening 127.0.0.1 from history, or a second browser) left every request
+ * 401ing with no way to authenticate and no login surface to offer one. The
+ * only cure was restarting the server. The token is a 256-bit secret in a
+ * 0700 directory on loopback — re-redeeming it is no weaker than the session
+ * token it hands out, and it is what makes reopening the tab just work.
+ */
+function consumeLaunchToken(candidate) {
+  return tokenMatches(candidate, LAUNCH_TOKEN);
+}
+
+/**
+ * Points a second launcher at the Studio that already owns the port.
+ *
+ * Written only after `listen` succeeds, so a process that loses the race never
+ * clobbers the winner's entry.
+ */
+async function writeRuntimeFile() {
+  await writeFile(
+    RUNTIME_FILE,
+    `${JSON.stringify(
+      { pid: process.pid, port: PORT, origin: EXPECTED_ORIGIN, launchToken: LAUNCH_TOKEN },
+      null,
+      2,
+    )}\n`,
+    { mode: 0o600 },
+  );
+}
+
+/**
+ * Resolves the running Studio on our port, or null. Confirms it is really
+ * Studio (and still alive) rather than trusting a possibly stale file.
+ */
+async function describeRunningStudio() {
+  let record;
+  try {
+    record = JSON.parse(await readFile(RUNTIME_FILE, "utf8"));
+  } catch {
+    return null;
+  }
+  if (!record || record.port !== PORT || typeof record.launchToken !== "string") {
+    return null;
+  }
+  const origin = String(record.origin || EXPECTED_ORIGIN);
+  try {
+    const probe = await fetch(new URL("/api/ping", origin), {
+      signal: AbortSignal.timeout(2500),
+    });
+    const body = await probe.json();
+    if (body?.app !== "claude-cli-studio") {
+      return null;
+    }
+  } catch {
+    return null;
+  }
+  const href = new URL("/", origin);
+  href.searchParams.set("launch", record.launchToken);
+  return { pid: record.pid, origin, launchHref: href.href };
+}
+
+/**
+ * Clears `launch-<pid>` directories left by servers that were killed rather
+ * than shut down. Without this they pile up in the data directory forever.
+ */
+async function pruneStaleLaunchDirectories() {
+  let entries;
+  try {
+    entries = await readdir(DATA_DIRECTORY, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    const match = entry.isDirectory() && /^launch-(\d+)$/.exec(entry.name);
+    if (!match || Number(match[1]) === process.pid) {
+      continue;
+    }
+    try {
+      process.kill(Number(match[1]), 0);
+    } catch (error) {
+      // ESRCH means no such process; EPERM means it exists but is not ours,
+      // so leave that one alone.
+      if (error.code === "ESRCH") {
+        await rm(path.join(DATA_DIRECTORY, entry.name), {
+          recursive: true,
+          force: true,
+        }).catch(() => {});
+      }
+    }
+  }
+}
 
 const sessionCatalog = new SessionCatalog();
 const stateStore = new StateStore(path.join(DATA_DIRECTORY, "state.json"), WORKSPACE_ROOT);
@@ -233,7 +323,130 @@ const claude = new ClaudeBridge({
     }
   },
   onPermissionRequest: waitForPermission,
+  onRateLimit: (info) => limitWatch.observe(info),
 });
+
+const turnQueue = new TurnQueue();
+const limitWatch = new LimitWatch({
+  onChange: () => broadcast(watchPayload()),
+  onRelease: () => {
+    releaseQueuedTurns().catch((error) => {
+      console.error(`Could not release queued turns: ${error.message}`);
+    });
+  },
+});
+
+function watchPayload() {
+  return { type: "watch-changed", limit: limitWatch.snapshot(), queue: turnQueue.list() };
+}
+
+/**
+ * Sends one turn to Claude Code. Shared by the composer and by the watch, so a
+ * turn released hours later goes through exactly the same path — same project
+ * resolution, same attachment handling, same stream bookkeeping — as one you
+ * send by hand.
+ */
+async function deliverTurn({
+  sessionId,
+  isNewSession,
+  project,
+  prompt,
+  uploadIds,
+  model,
+  effort,
+  permissionMode,
+  priority = null,
+}) {
+  const displayPrompt = prompt || "Please review the attached files.";
+  const uploads = uploadStore
+    .getMany(uploadIds)
+    .map((upload) => uploadStore.publicMetadata(upload));
+
+  let sent;
+  pendingMessageSessions.add(sessionId);
+  try {
+    const attachmentBlocks = await uploadStore.toContentBlocks(uploadIds);
+    sent = await claude.sendMessage({
+      sessionId,
+      isNewSession,
+      cwd: project.path,
+      content: [{ type: "text", text: displayPrompt }, ...attachmentBlocks],
+      model,
+      effort,
+      permissionMode,
+      priority,
+    });
+    await stateStore.setSessionProject(sessionId, project.id);
+    if (uploadIds.length) {
+      await uploadStore.markAttached(uploadIds, sessionId);
+    }
+  } finally {
+    pendingMessageSessions.delete(sessionId);
+  }
+
+  // A parked message must not replace the user message the running turn is
+  // still answering — the browser shows it as a separate pending bubble.
+  if (!sent?.queued) {
+    setStreamUserMessage(sessionId, {
+      role: "user",
+      content: displayPrompt,
+      attachments: uploads,
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  sessionCatalog.invalidate();
+  broadcast({ type: "sessions-changed" });
+  return { sessionId, prompt: displayPrompt, ...sent };
+}
+
+/**
+ * Fires every parked turn now that the window has reset. Draining first means a
+ * second lift signal arriving mid-release finds an empty queue and cannot send
+ * anything twice. One failure does not strand the rest.
+ */
+async function releaseQueuedTurns() {
+  const parked = turnQueue.drain();
+  if (!parked.length) {
+    limitWatch.setPendingCount(0);
+    return;
+  }
+
+  const projects = await catalog();
+  const released = [];
+  const failed = [];
+
+  for (const entry of parked) {
+    const project = projectById(projects, entry.projectId);
+    if (!project) {
+      failed.push({ sessionId: entry.sessionId, error: "That project is no longer configured." });
+      continue;
+    }
+    try {
+      await deliverTurn({
+        sessionId: entry.sessionId,
+        isNewSession: entry.isNewSession,
+        project,
+        prompt: entry.prompt,
+        uploadIds: entry.uploadIds,
+        model: entry.model,
+        effort: entry.effort,
+        permissionMode: entry.permissionMode,
+      });
+      released.push({ sessionId: entry.sessionId, prompt: entry.prompt });
+    } catch (error) {
+      failed.push({ sessionId: entry.sessionId, error: error.message });
+    }
+  }
+
+  limitWatch.setPendingCount(turnQueue.size());
+  broadcast({ type: "watch-released", released, failed });
+  broadcast(watchPayload());
+  console.log(
+    `Usage window reset — released ${released.length} queued turn(s)` +
+      (failed.length ? `, ${failed.length} failed` : ""),
+  );
+}
 
 function expandHomePath(candidate) {
   const value = String(candidate || "").trim();
@@ -296,27 +509,12 @@ function requestIsAuthenticated(request) {
 }
 
 function authorizeBrowser(response) {
-  launchAvailable = false;
-  clearTimeout(launchExpiryTimer);
-  removeLaunchFiles().catch(() => {});
   applySecurityHeaders(response);
   response.writeHead(303, {
     "Cache-Control": "no-store",
     "Location": `/#studio-token=${encodeURIComponent(SESSION_TOKEN)}`,
   });
   response.end();
-}
-
-function consumeLaunchToken(candidate) {
-  if (
-    !launchAvailable ||
-    Date.now() > LAUNCH_EXPIRES_AT ||
-    !tokenMatches(candidate, LAUNCH_TOKEN)
-  ) {
-    return false;
-  }
-  launchAvailable = false;
-  return true;
 }
 
 let cachedCliInfo = null;
@@ -371,6 +569,8 @@ async function bootstrapPayload() {
     efforts: effortLevels(),
     permissionModes: permissionModes(),
     projects,
+    limit: limitWatch.snapshot(),
+    queue: turnQueue.list(),
   };
 }
 
@@ -379,10 +579,8 @@ function projectById(projects, projectId) {
 }
 
 function parseSessionPath(pathname) {
-  const match = pathname.match(
-    /^\/api\/sessions\/([0-9a-f-]{8,})(?:\/(abort|organize))?$/i,
-  );
-  if (!match) {
+  const match = pathname.match(/^\/api\/sessions\/([^/]+)(?:\/(abort|organize))?$/i);
+  if (!match || !isSessionId(match[1])) {
     return null;
   }
   return { sessionId: match[1], action: match[2] || null };
@@ -400,6 +598,8 @@ function beginEventStream(request, response) {
     `data: ${JSON.stringify({
       type: "connected",
       streams: [...sessionStreams.keys()].map(streamSnapshot).filter(Boolean),
+      limit: limitWatch.snapshot(),
+      queue: turnQueue.list(),
     })}\n\n`,
   );
   eventClients.add(response);
@@ -440,6 +640,45 @@ async function handleApi(request, response, url) {
 
   if (request.method === "GET" && url.pathname === "/api/events") {
     beginEventStream(request, response);
+    return true;
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/auth") {
+    const account = await claude.accountInfo({ cwd: WORKSPACE_ROOT });
+    json(response, 200, { account });
+    return true;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/auth/login") {
+    try {
+      json(response, 200, await claude.beginLogin({ cwd: WORKSPACE_ROOT }));
+    } catch (error) {
+      json(response, error.unsupported ? 501 : 500, { error: error.message });
+    }
+    return true;
+  }
+
+  // No code: wait for the CLI's own loopback listener to catch the redirect.
+  // With one: submit what the user pasted from the manual page.
+  if (request.method === "POST" && url.pathname === "/api/auth/complete") {
+    const body = await readJson(request);
+    try {
+      await claude.completeLogin({
+        code: typeof body.code === "string" && body.code ? body.code : null,
+        state: typeof body.state === "string" && body.state ? body.state : null,
+      });
+      const account = await claude.accountInfo({ cwd: WORKSPACE_ROOT });
+      broadcast({ type: "auth.changed", data: { account } });
+      json(response, 200, { account });
+    } catch (error) {
+      json(response, error.unsupported ? 501 : 400, { error: error.message });
+    }
+    return true;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/auth/cancel") {
+    claude.cancelLogin();
+    json(response, 200, { ok: true });
     return true;
   }
 
@@ -488,6 +727,11 @@ async function handleApi(request, response, url) {
     await uploadStore.deleteForSession(sessionPath.sessionId);
     await stateStore.forgetSession(sessionPath.sessionId);
     sessionStreams.delete(sessionPath.sessionId);
+    // A parked turn for a session that no longer exists must not wake up later.
+    if (turnQueue.cancel(sessionPath.sessionId)) {
+      limitWatch.setPendingCount(turnQueue.size());
+      broadcast(watchPayload());
+    }
     broadcast({ type: "sessions-changed" });
     json(response, 200, { ok: true });
     return true;
@@ -553,57 +797,104 @@ async function handleApi(request, response, url) {
     }
 
     const requestedSessionId = body.sessionId || null;
-    if (
+    // The id becomes a transcript filename, so reject anything that is not a
+    // real session id rather than letting a malformed client mint one.
+    if (requestedSessionId !== null && !isSessionId(requestedSessionId)) {
+      json(response, 400, { error: "That conversation id is not valid." });
+      return true;
+    }
+    // Typing while Claude works is not an error — it is how the terminal
+    // behaves. The message rides the CLI's own command queue: 'next' runs when
+    // the current turn finishes, 'now' (/btw) folds into the turn in flight.
+    const turnInFlight = Boolean(
       requestedSessionId &&
-      (pendingMessageSessions.has(requestedSessionId) ||
-        sessionStreams.get(requestedSessionId)?.running)
-    ) {
+        (pendingMessageSessions.has(requestedSessionId) ||
+          sessionStreams.get(requestedSessionId)?.running),
+    );
+    const priority = body.priority === "now" ? "now" : turnInFlight ? "next" : null;
+    if (priority && !claude.isRunning(requestedSessionId)) {
       json(response, 409, {
-        error: "Wait for the current response to finish before sending another message.",
+        error: "That conversation is busy in another window. Try again in a moment.",
       });
       return true;
     }
 
     const sessionId = requestedSessionId || crypto.randomUUID();
-    pendingMessageSessions.add(sessionId);
-    const displayPrompt = prompt || "Please review the attached files.";
-    const uploads = selectedUploads.map((upload) => uploadStore.publicMetadata(upload));
 
-    try {
-      const attachmentBlocks = await uploadStore.toContentBlocks(uploadIds);
-      const content = [{ type: "text", text: displayPrompt }, ...attachmentBlocks];
-
-      await claude.sendMessage({
+    // Park the turn instead of sending it. Attachments are marked against the
+    // session right away so the pending-upload pruner cannot delete them out
+    // from under a turn that waits hours for the window to reset.
+    if (body.queueForReset) {
+      if (uploadIds.length) {
+        await uploadStore.markAttached(uploadIds, sessionId);
+      }
+      await stateStore.setSessionProject(sessionId, selectedProject.id);
+      const entry = turnQueue.add({
         sessionId,
+        projectId: selectedProject.id,
         isNewSession: !requestedSessionId,
-        cwd: selectedProject.path,
-        content,
+        prompt,
+        uploadIds,
         model: body.model || null,
         effort: body.effort || null,
         permissionMode,
       });
+      limitWatch.setPendingCount(turnQueue.size());
+      broadcast(watchPayload());
+      json(response, 202, { sessionId, queued: entry, limit: limitWatch.snapshot() });
+      return true;
+    }
 
-      await stateStore.setSessionProject(sessionId, selectedProject.id);
-      if (uploadIds.length) {
-        await uploadStore.markAttached(uploadIds, sessionId);
-      }
+    let sent;
+    try {
+      sent = await deliverTurn({
+        sessionId,
+        isNewSession: !requestedSessionId,
+        project: selectedProject,
+        prompt,
+        uploadIds,
+        model: body.model || null,
+        effort: body.effort || null,
+        permissionMode,
+        priority,
+      });
     } catch (error) {
       json(response, 500, { error: error.message });
       return true;
-    } finally {
-      pendingMessageSessions.delete(sessionId);
     }
 
-    setStreamUserMessage(sessionId, {
-      role: "user",
-      content: displayPrompt,
-      attachments: uploads,
-      timestamp: new Date().toISOString(),
+    json(response, 202, {
+      sessionId,
+      queued: Boolean(sent?.queued),
+      priority: sent?.queued ? priority : null,
+      messageUuid: sent?.messageUuid || null,
     });
+    return true;
+  }
 
-    sessionCatalog.invalidate();
-    broadcast({ type: "sessions-changed" });
-    json(response, 202, { sessionId });
+  if (request.method === "GET" && url.pathname === "/api/watch") {
+    json(response, 200, { limit: limitWatch.snapshot(), queue: turnQueue.list() });
+    return true;
+  }
+
+  // A manual "check now", for when you want to know where you stand without
+  // waiting for the next poll or for a session to report in.
+  if (request.method === "POST" && url.pathname === "/api/watch/check") {
+    const limit = await limitWatch.check();
+    json(response, 200, { limit, queue: turnQueue.list() });
+    return true;
+  }
+
+  const queueMatch = url.pathname.match(/^\/api\/watch\/queue\/([^/]+)$/i);
+  if (request.method === "DELETE" && queueMatch && isSessionId(queueMatch[1])) {
+    const cancelled = turnQueue.cancel(queueMatch[1]);
+    if (!cancelled) {
+      json(response, 404, { error: "Nothing is queued for that conversation." });
+      return true;
+    }
+    limitWatch.setPendingCount(turnQueue.size());
+    broadcast(watchPayload());
+    json(response, 200, { cancelled });
     return true;
   }
 
@@ -735,6 +1026,13 @@ const server = http.createServer(async (request, response) => {
       authorizeBrowser(response);
       return;
     }
+    // Unauthenticated on purpose, and says nothing a caller on this loopback
+    // port could not already infer: it exists so a second launcher can tell
+    // "Studio already owns this port" from "something else does".
+    if (request.method === "GET" && url.pathname === "/api/ping") {
+      json(response, 200, { app: "claude-cli-studio" });
+      return;
+    }
     if (url.pathname.startsWith("/api/")) {
       if (!requestIsAuthenticated(request)) {
         json(response, 401, { error: "Studio authentication is required." });
@@ -772,7 +1070,38 @@ function openBrowser(url) {
   child.unref();
 }
 
+/**
+ * A second launch is a request to *see* Studio, not to run a second copy.
+ *
+ * Double-clicking the launcher while one is already up used to die on
+ * EADDRINUSE before printing anything useful — the window flashed and closed.
+ * Hand the browser to the instance that owns the port and exit happy.
+ */
+server.on("error", async (error) => {
+  // Anything else is a genuine failure. Report it and stop — rethrowing from
+  // an async handler would only surface as an unhandled rejection.
+  if (error.code !== "EADDRINUSE") {
+    console.error(error);
+    process.exit(1);
+  }
+  const running = await describeRunningStudio();
+  await removeLaunchFiles().catch(() => {});
+  if (running) {
+    console.log(
+      `Claude CLI Studio is already running at ${running.origin} (pid ${running.pid}).`,
+    );
+    console.log("Opening that one in your browser instead of starting a second.");
+    openBrowser(running.launchHref);
+    process.exit(0);
+  }
+  console.error(`Port ${PORT} is already in use by something that is not Studio.`);
+  console.error("Set CLAUDE_STUDIO_PORT to a free port and try again.");
+  process.exit(1);
+});
+
 server.listen(PORT, HOST, async () => {
+  await writeRuntimeFile().catch(() => {});
+  await pruneStaleLaunchDirectories();
   console.log(`Claude CLI Studio is running at ${EXPECTED_ORIGIN}`);
   console.log(`Workspace root: ${WORKSPACE_ROOT}`);
   const cli = await cliInfo();
@@ -795,8 +1124,9 @@ async function shutdown() {
   }
   shuttingDown = true;
   clearInterval(uploadPruneTimer);
-  clearTimeout(launchExpiryTimer);
+  limitWatch.dispose();
   await removeLaunchFiles().catch(() => {});
+  await rm(RUNTIME_FILE, { force: true }).catch(() => {});
   for (const timeout of streamCleanupTimers.values()) {
     clearTimeout(timeout);
   }

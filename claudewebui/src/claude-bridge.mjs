@@ -11,6 +11,38 @@ import { query } from "@anthropic-ai/claude-agent-sdk";
 
 const RUNNER_IDLE_MS = 15 * 60 * 1000;
 
+/**
+ * The static half of the `query()` options for one runner.
+ *
+ * `allowDangerouslySkipPermissions` is unconditional on purpose. It is only an
+ * *unlock* — the SDK turns it into the CLI's `--allow-dangerously-skip-permissions`,
+ * which permits a session to enter `bypassPermissions` but does not itself skip
+ * anything; `permissionMode` still decides what actually happens. Because a
+ * runner is long-lived, gating the flag on the mode of the *first* turn made
+ * later `setPermissionMode("bypassPermissions")` calls throw "the session was
+ * not launched with --dangerously-skip-permissions", so picking Autopilot
+ * mid-conversation failed. The only caller that can flip the mode is the user's
+ * own dropdown — `sessionPermissionUpdates` strips `setMode` suggestions, so
+ * Claude can never widen the session on its own.
+ */
+export function sessionQueryOptions({ cwd, model, effort, permissionMode }) {
+  return {
+    cwd,
+    model: model || undefined,
+    effort: effort || undefined,
+    permissionMode,
+    allowDangerouslySkipPermissions: true,
+    includePartialMessages: true,
+    // Behave like the terminal: same CLAUDE.md, same settings, same
+    // system prompt. Without these the SDK runs a bare agent instead.
+    systemPrompt: { type: "preset", preset: "claude_code" },
+    settingSources: ["user", "project", "local"],
+    // Studio has no in-band question surface, so let Claude ask in prose
+    // rather than stalling on a dialog the browser cannot render.
+    disallowedTools: ["AskUserQuestion"],
+  };
+}
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -103,26 +135,15 @@ class SessionRunner {
     this.disposed = false;
     this.currentMessageId = null;
     this.stderrTail = [];
+    // True between sending a turn and its result. Decides whether a new message
+    // starts a turn or parks behind the one already running.
+    this.running = false;
+    this.pending = new Map();
 
     this.query = query({
       prompt: this.queue,
       options: {
-        cwd: options.cwd,
-        model: options.model || undefined,
-        effort: options.effort || undefined,
-        permissionMode: options.permissionMode,
-        // Autopilot is the one mode the CLI refuses to enter without an
-        // explicit opt-in flag.
-        allowDangerouslySkipPermissions:
-          options.permissionMode === "bypassPermissions" || undefined,
-        includePartialMessages: true,
-        // Behave like the terminal: same CLAUDE.md, same settings, same
-        // system prompt. Without these the SDK runs a bare agent instead.
-        systemPrompt: { type: "preset", preset: "claude_code" },
-        settingSources: ["user", "project", "local"],
-        // Studio has no in-band question surface, so let Claude ask in prose
-        // rather than stalling on a dialog the browser cannot render.
-        disallowedTools: ["AskUserQuestion"],
+        ...sessionQueryOptions(options),
         canUseTool: (toolName, input, context) =>
           this.bridge.handlePermission(this.sessionId, toolName, input, context),
         abortController: this.abortController,
@@ -182,8 +203,37 @@ class SessionRunner {
       return;
     }
 
+    // The CLI reports plan limit state on any live query — status, reset time,
+    // and window utilization. Studio's watch rides on this instead of polling
+    // whenever a session happens to be running.
+    if (message.type === "rate_limit_event") {
+      this.bridge.onRateLimit?.(message.rate_limit_info);
+      return;
+    }
+
+    // The CLI's own suggested next prompt — what the terminal offers as ghost
+    // text you accept with Tab.
+    if (message.type === "prompt_suggestion") {
+      this.emit(studioEvent("session.suggestion", { suggestion: message.suggestion }));
+      return;
+    }
+
     if (message.type === "result") {
       this.currentMessageId = null;
+
+      // A `/btw` note folds into the turn already running by aborting it and
+      // re-running with the note included. That abort surfaces as an
+      // error_during_execution result which is bookkeeping, not a failure —
+      // the real answer arrives in the turn that immediately follows. Report it
+      // as an error and every side question would look like a crash.
+      const foldingIn =
+        [...this.pending.values()].includes("now") &&
+        message.subtype === "error_during_execution";
+      if (foldingIn) {
+        this.clearPending("now");
+        return;
+      }
+
       if (message.subtype !== "success" || message.is_error) {
         this.emit(
           studioEvent("session.error", {
@@ -194,6 +244,7 @@ class SessionRunner {
           }),
         );
       }
+      this.running = false;
       this.emit(
         studioEvent("session.idle", {
           stopReason: message.stop_reason ?? null,
@@ -202,7 +253,16 @@ class SessionRunner {
           numTurns: message.num_turns ?? null,
         }),
       );
-      this.scheduleIdleDisposal();
+
+      // The CLI dequeues anything parked and starts it straight away, so go
+      // back to running rather than letting the composer look idle for a beat.
+      if (this.pending.size) {
+        this.clearPending();
+        this.running = true;
+        this.emit(studioEvent("session.running", {}));
+      } else {
+        this.scheduleIdleDisposal();
+      }
       return;
     }
 
@@ -318,32 +378,81 @@ class SessionRunner {
     this.idleTimer.unref?.();
   }
 
-  async send({ content, model, effort, permissionMode }) {
+  /**
+   * Sends one turn, or parks one behind the turn already running.
+   *
+   * `priority` maps straight onto the CLI's own command queue, which is what
+   * the terminal uses when you type while Claude is working:
+   *
+   *   - undefined / 'next' — run after the current turn finishes. Typing ahead.
+   *   - 'now' — fold into the turn already in flight. This is `/btw`: the CLI
+   *     aborts the running turn and immediately re-runs it with your note
+   *     included, so the answer accounts for what you just said.
+   *
+   * Model, effort and permission mode are session-wide settings that take
+   * effect immediately, so they are only applied when nothing is running.
+   * Changing them for a message that has not started yet would silently
+   * re-steer the turn currently on screen.
+   */
+  async send({ content, model, effort, permissionMode, priority = null }) {
     this.clearIdleTimer();
+    const queueing = Boolean(priority) && this.running;
 
-    if (permissionMode && permissionMode !== this.permissionMode) {
-      await this.query.setPermissionMode(permissionMode);
-      this.permissionMode = permissionMode;
-    }
-    if ((model ?? null) !== this.model) {
-      await this.query.setModel(model || undefined);
-      this.model = model ?? null;
-    }
-    if ((effort ?? null) !== this.effort) {
-      await this.query
-        .applyFlagSettings({ effort: effort || null })
-        .catch(() => {});
-      this.effort = effort ?? null;
+    if (!queueing) {
+      if (permissionMode && permissionMode !== this.permissionMode) {
+        await this.query.setPermissionMode(permissionMode);
+        this.permissionMode = permissionMode;
+      }
+      if ((model ?? null) !== this.model) {
+        await this.query.setModel(model || undefined);
+        this.model = model ?? null;
+      }
+      if ((effort ?? null) !== this.effort) {
+        await this.query
+          .applyFlagSettings({ effort: effort || null })
+          .catch(() => {});
+        this.effort = effort ?? null;
+      }
     }
 
-    this.emit(studioEvent("session.running", {}));
+    const messageUuid = crypto.randomUUID();
+    if (queueing) {
+      this.pending.set(messageUuid, priority);
+      this.emit(studioEvent("session.pending", { messageUuid, priority }));
+    } else {
+      this.running = true;
+      this.emit(studioEvent("session.running", {}));
+    }
+
     this.queue.push({
       type: "user",
       message: { role: "user", content },
       parent_tool_use_id: null,
       session_id: this.sessionId,
+      ...(queueing ? { priority, uuid: messageUuid } : {}),
     });
+    return { messageUuid, queued: queueing };
   }
+
+  /** Forgets parked messages the CLI has taken off its queue, and tells the UI. */
+  clearPending(priority = null) {
+    const cleared = [];
+    for (const [messageUuid, entry] of this.pending) {
+      if (!priority || entry === priority) {
+        cleared.push(messageUuid);
+        this.pending.delete(messageUuid);
+      }
+    }
+    if (cleared.length) {
+      this.emit(studioEvent("session.pending_cleared", { messageUuids: cleared }));
+    }
+  }
+
+  // Note: a parked message cannot be un-queued. The CLI protocol has
+  // cancel_async_message and interrupt's cancel_queued, but the SDK's public
+  // Query API exposes neither, so there is nothing honest to wire a Cancel
+  // button to. Stop still aborts the running turn — the parked message then
+  // runs, which is what the terminal does too.
 
   async interrupt() {
     await this.query.interrupt().catch(() => {});
@@ -361,11 +470,192 @@ class SessionRunner {
   }
 }
 
+/**
+ * A CLI process kept open purely to run the account login flow.
+ *
+ * `/login` is NOT a slash command the SDK can run: it is absent from
+ * `supportedCommands()`, and sending it as a prompt makes the CLI answer
+ * "/login isn't available in this environment" because the flow belongs to the
+ * interactive terminal. The control requests underneath it are reachable
+ * though — `claudeAuthenticate` returns an authorize URL, and either
+ * `claudeOAuthWaitForCompletion` (the CLI listens on its own loopback port for
+ * the redirect) or `claudeOAuthCallback` (the user pastes `code#state`)
+ * finishes it.
+ *
+ * These three are undocumented — present on the runtime Query object but
+ * absent from `sdk.d.ts` — so every call is capability-checked and turns a
+ * missing method into a plain message rather than an SDK-shaped crash.
+ *
+ * The whole flow has to run against ONE CLI process: the PKCE verifier and the
+ * `state` value live in the process that issued the URL, so a second process
+ * would reject the callback. Hence one channel, held open between the two
+ * calls and disposed on completion or timeout.
+ *
+ * Nothing here writes `~/.claude/.credentials.json`. The CLI owns that file;
+ * Studio only asks it to run its own flow.
+ */
+const AUTH_CHANNEL_IDLE_MS = 10 * 60 * 1000;
+
+class AuthChannel {
+  constructor(cwd) {
+    this.queue = new MessageQueue();
+    this.abortController = new AbortController();
+    this.lastError = null;
+    this.disposed = false;
+
+    this.query = query({
+      prompt: this.queue,
+      options: {
+        cwd,
+        permissionMode: "default",
+        systemPrompt: { type: "preset", preset: "claude_code" },
+        settingSources: ["user", "project", "local"],
+        abortController: this.abortController,
+      },
+    });
+
+    this.pump = (async () => {
+      for await (const message of this.query) {
+        if (message.type === "auth_status" && message.error) {
+          this.lastError = message.error;
+        }
+      }
+    })().catch(() => {});
+
+    this.idleTimer = setTimeout(() => this.dispose(), AUTH_CHANNEL_IDLE_MS);
+    this.idleTimer.unref?.();
+  }
+
+  supports(method) {
+    return typeof this.query?.[method] === "function";
+  }
+
+  dispose() {
+    if (this.disposed) {
+      return;
+    }
+    this.disposed = true;
+    clearTimeout(this.idleTimer);
+    this.queue.close();
+    this.abortController.abort();
+  }
+}
+
+class UnsupportedByCli extends Error {
+  constructor(message) {
+    super(message);
+    this.unsupported = true;
+  }
+}
+
 export class ClaudeBridge {
-  constructor({ onEvent, onPermissionRequest }) {
+  constructor({
+    onEvent,
+    onPermissionRequest,
+    onRateLimit = () => {},
+    // Seam for tests: the real channel spawns a CLI process, and the guards
+    // around the undocumented control requests are the part worth covering.
+    openAuthChannel = (cwd) => new AuthChannel(cwd),
+  }) {
+    this.openAuthChannel = openAuthChannel;
     this.onEvent = onEvent;
     this.onPermissionRequest = onPermissionRequest;
+    this.onRateLimit = onRateLimit;
     this.runners = new Map();
+    this.authChannel = null;
+  }
+
+  /**
+   * Who the CLI is logged in as, or null when it cannot say.
+   *
+   * Reads through any live session runner so the common case costs no process;
+   * only falls back to a throwaway channel when nothing is running.
+   */
+  async accountInfo({ cwd }) {
+    const existing = [...this.runners.values()].find((runner) =>
+      typeof runner.query?.accountInfo === "function",
+    );
+    if (existing) {
+      return existing.query.accountInfo().catch(() => null);
+    }
+    const channel = this.openAuthChannel(cwd);
+    try {
+      if (!channel.supports("accountInfo")) {
+        return null;
+      }
+      return await channel.query.accountInfo();
+    } catch {
+      return null;
+    } finally {
+      channel.dispose();
+    }
+  }
+
+  /** Starts a login and returns the URLs to send the browser to. */
+  async beginLogin({ cwd }) {
+    this.authChannel?.dispose();
+    const channel = this.openAuthChannel(cwd);
+    this.authChannel = channel;
+    if (!channel.supports("claudeAuthenticate")) {
+      channel.dispose();
+      this.authChannel = null;
+      throw new UnsupportedByCli(
+        "This Claude Code build does not expose the login flow to Studio. Run `claude /login` in a terminal.",
+      );
+    }
+    try {
+      const urls = await channel.query.claudeAuthenticate(true);
+      return {
+        manualUrl: urls?.manualUrl || null,
+        automaticUrl: urls?.automaticUrl || null,
+      };
+    } catch (error) {
+      channel.dispose();
+      this.authChannel = null;
+      throw error;
+    }
+  }
+
+  /**
+   * Finishes a login. With no code, waits for the CLI's own loopback listener
+   * to catch the redirect; with one, submits the pasted `code#state` pair.
+   */
+  async completeLogin({ code = null, state = null } = {}) {
+    const channel = this.authChannel;
+    if (!channel || channel.disposed) {
+      throw new Error("No login is in progress. Run /login again.");
+    }
+    const method = code ? "claudeOAuthCallback" : "claudeOAuthWaitForCompletion";
+    if (!channel.supports(method)) {
+      throw new UnsupportedByCli(
+        "This Claude Code build cannot finish a login from Studio. Run `claude /login` in a terminal.",
+      );
+    }
+    try {
+      if (code) {
+        await channel.query.claudeOAuthCallback(code, state);
+      } else {
+        await channel.query.claudeOAuthWaitForCompletion();
+      }
+    } catch (error) {
+      throw new Error(channel.lastError || error.message);
+    } finally {
+      channel.dispose();
+      this.authChannel = null;
+    }
+
+    // Session runners hold a CLI process that authenticated at spawn time, so
+    // they are still on the old identity. Drop them and let the next turn
+    // start fresh under the new login.
+    for (const runner of [...this.runners.values()]) {
+      runner.dispose();
+    }
+    this.runners.clear();
+  }
+
+  cancelLogin() {
+    this.authChannel?.dispose();
+    this.authChannel = null;
   }
 
   forgetRunner(sessionId, runner) {
@@ -409,6 +699,7 @@ export class ClaudeBridge {
     model,
     effort,
     permissionMode,
+    priority = null,
   }) {
     let runner = this.runners.get(sessionId);
 
@@ -428,8 +719,12 @@ export class ClaudeBridge {
       this.runners.set(sessionId, runner);
     }
 
-    await runner.send({ content, model, effort, permissionMode });
-    return { sessionId };
+    const sent = await runner.send({ content, model, effort, permissionMode, priority });
+    return { sessionId, ...sent };
+  }
+
+  isPending(sessionId) {
+    return (this.runners.get(sessionId)?.pending.size ?? 0) > 0;
   }
 
   async abort(sessionId) {
@@ -444,6 +739,7 @@ export class ClaudeBridge {
   }
 
   async stop() {
+    this.cancelLogin();
     for (const runner of [...this.runners.values()]) {
       runner.dispose();
     }

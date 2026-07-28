@@ -77,6 +77,15 @@
           </div>
         </nav>
 
+        <div class="limit-meter hidden" id="limitMeter">
+          <div class="limit-row">
+            <span class="limit-label" id="limitLabel">Usage</span>
+            <span class="limit-value" id="limitValue"></span>
+          </div>
+          <div class="limit-bar"><span id="limitBar"></span></div>
+          <small class="limit-detail" id="limitDetail"></small>
+        </div>
+
         <footer class="sidebar-footer">
           <div class="connection-row">
             <span class="status-dot" id="statusDot"></span>
@@ -175,12 +184,18 @@
         <section class="composer-wrap">
           <div class="attachment-strip hidden" id="attachmentStrip"></div>
           <div class="composer" id="composer">
-            <textarea
-              id="messageInput"
-              rows="1"
-              placeholder="Ask anything, use /commands, or drop several files here…"
-              aria-label="Message"
-            ></textarea>
+            <div class="input-stack">
+              <div class="ghost-suggestion hidden" id="ghostSuggestion" aria-hidden="true">
+                <span id="ghostText"></span>
+                <kbd>Tab</kbd>
+              </div>
+              <textarea
+                id="messageInput"
+                rows="1"
+                placeholder="Ask anything, use /commands, or drop several files here…"
+                aria-label="Message"
+              ></textarea>
+            </div>
             <div class="composer-footer">
               <div class="composer-controls">
                 <button class="composer-control attach-control" id="attachButton">
@@ -197,6 +212,18 @@
                 <select class="composer-control" id="effortSelect" aria-label="Effort">
                   <option value="" selected>Default effort</option>
                 </select>
+                <button
+                  class="composer-control watch-control"
+                  id="watchButton"
+                  aria-pressed="false"
+                  title="Hold this message until the usage window resets, then send it automatically"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <circle cx="12" cy="12" r="8.5"/>
+                    <path d="M12 7.5V12l3 1.8"/>
+                  </svg>
+                  Queue for reset
+                </button>
               </div>
               <div class="send-controls">
                 <span class="upload-status" id="uploadStatus"></span>
@@ -225,6 +252,22 @@
         </svg>
         <strong>Drop files into this conversation</strong>
         <span>Up to 12 files, 30 MB combined</span>
+      </div>
+    </div>
+
+    <div class="signin-overlay hidden" id="signinOverlay">
+      <div class="signin-card">
+        <strong>This tab isn&rsquo;t signed in to Studio</strong>
+        <p id="signinReason">
+          Studio hands each browser a token when it launches. This one is missing
+          or belongs to an earlier run of the server.
+        </p>
+        <p>
+          Start <strong>Claude Studio</strong> again &mdash; if the server is still
+          running it will just open a fresh, signed-in tab rather than starting a
+          second copy.
+        </p>
+        <button type="button" class="primary" id="signinRetry">Retry</button>
       </div>
     </div>
 

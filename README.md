@@ -21,9 +21,14 @@ claude -p --resume <session-id> "<your wake prompt>"
   `/v1/messages` call with the OAuth token Claude Code already stores, and reads
   the **unified rate-limit headers** — the same data behind the Claude app's
   Usage panel (`Settings → Usage`). That tells it, precisely, whether you're
-  capped and the exact time the 5-hour window resets. While you're capped the
+  capped and the exact time the blocking window resets. While you're capped the
   call is rejected (HTTP 429) and **costs nothing**, but it still reports the
   reset time — so the tool knows exactly when to resume.
+- **"Window used up" is not the same as "you're blocked."** If your account has
+  overage credits and they're covering your requests, work keeps flowing even
+  though the 5-hour window reads as spent — so the tool keeps waiting instead of
+  resuming against a limit you never actually hit. It resumes only when work is
+  genuinely being refused.
 - **Account-wide cap.** One check covers every selected project, so watching 4
   projects costs the same as watching 1.
 - **Survives long waits without touching your login.** It records the reset time

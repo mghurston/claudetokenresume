@@ -56,6 +56,8 @@ must never interfere with the user's real interactive Claude Code sessions.
 | `Claude Watch.cmd` | Double-click launcher (`%~dp0`-relative; rename-safe) |
 | `CLAUDE.md` / `README.md` | Docs |
 | `logs/` | Resume run output — git-ignored, may contain session content |
+| `claudewebui/` | Claude CLI Studio — the web UI, with its own copy of the watch |
+| `Claude Studio.cmd` / `.command` | Double-click launchers for Studio (Windows / macOS) |
 
 ## Architecture of the GUI (`claude-watch-ui.ps1`)
 
@@ -102,6 +104,104 @@ have advanced the conversation into a new jsonl).
   Stop button and `FormClosing`. **Never kill `claude` by process name** — that
   would kill the user's real Claude Code sessions.
 
+## Claude CLI Studio (`claudewebui/`)
+
+A local web UI for Claude Code, built on `@anthropic-ai/claude-agent-sdk`. It
+carries its own copy of the watch, with two differences that matter:
+
+- **It resumes in-app, not in a terminal.** A parked turn is released through
+  the same `claude.sendMessage()` the composer uses, so the answer streams into
+  the conversation you already have open. No generated `.cmd`, no
+  `logs/`, no stale windows, and the `acceptEdits` footgun is gone because
+  prompts render in the browser.
+- **Detection is mostly free.** The SDK streams `rate_limit_event`
+  (`SDKRateLimitEvent`, part of the `SDKMessage` union) on any live query, with
+  status, reset, and utilization. `src/limit-watch.mjs` prefers that and only
+  falls back to its own header probe while a turn is queued *and* no session is
+  running to report in — runners self-dispose after 15 min idle, so the SDK feed
+  goes quiet exactly then.
+
+Typing while a turn runs is **not** an error — it maps onto the CLI's own
+command queue via `priority` on the pushed `SDKUserMessage`:
+
+- `'next'` — runs when the current turn ends. This is plain type-ahead, shown in
+  the browser as a greyed bubble with a Queued tag.
+- `'now'` — `/btw`. Folds into the turn in flight. The CLI does this by aborting
+  the running turn and re-running it with the note included, which surfaces as
+  an `error_during_execution` result. **That is bookkeeping, not a failure** —
+  `handleMessage` suppresses it while a `'now'` message is pending, or every
+  side question would look like a crash.
+
+Model, effort and permission mode are only applied when nothing is running;
+they take effect immediately, so applying them for a message that has not
+started would silently re-steer the turn already on screen.
+
+A queued message cannot be cancelled: the protocol has `cancel_async_message`
+and `interrupt`'s `cancel_queued`, but the SDK's public `Query` API exposes
+neither. Do not add a Cancel button until it does.
+
+### Slash commands and `/login`
+
+Ordinary slash commands need **no** special handling — `/context`, `/model`,
+`/usage`, skills and plugin commands all reach the CLI as plain prompt text and
+come back as an assistant message. Verified live. Do not add interception for
+them.
+
+`/login` and `/logout` are the exception: they are **absent from
+`supportedCommands()`**, and sending `/login` as text makes the CLI answer
+"/login isn't available in this environment" — the flow belongs to the
+interactive terminal. So `studioCommands` in `app.js` intercepts three account
+commands (`/login`, `/whoami`, `/logout`) and Studio answers them itself.
+
+The login runs on control requests that exist on the runtime `Query` object but
+are **not in `sdk.d.ts`**: `claudeAuthenticate(true)` -> `{manualUrl,
+automaticUrl}`, then `claudeOAuthWaitForCompletion()` (the CLI listens on its
+own loopback port for the redirect) or `claudeOAuthCallback(code, state)` (the
+user pastes `code#state`). `accountInfo()` *is* public and backs `/whoami`.
+Because they are undocumented, every call is capability-checked via
+`AuthChannel.supports()` and a missing method raises `UnsupportedByCli`, which
+the UI renders as "run `claude /login` in a terminal". **Keep that guard** — an
+SDK bump is the expected way this breaks.
+
+One `AuthChannel` spans the whole flow on purpose: the PKCE verifier and
+`state` live in the CLI process that issued the URL, so a second process would
+reject the callback. After a successful login every session runner is disposed,
+since each authenticated when its process spawned and would otherwise keep
+using the old account.
+
+**There is no logout control request**, and `/logout` must NOT be faked by
+deleting `.credentials.json` — same rule as everywhere else in this repo. It
+tells the user to run `claude /logout`.
+
+### Getting into Studio (do not re-break this)
+
+The browser is authorized by a launch nonce written to a `0700` directory and
+swapped for a session token. That handoff used to be **single-use with a
+two-minute expiry**, and the token lived in **`sessionStorage`** — so closing
+the tab, or opening `127.0.0.1:4174` from history or a second browser, left
+every request 401ing with **no way to authenticate and no login surface**. Only
+restarting the server helped. Now: the nonce stays redeemable for the server's
+lifetime, the token lives in `localStorage`, and a 401 clears the dead token
+and shows `#signinOverlay` explaining what to do. **Do not reintroduce
+single-use or the expiry.**
+
+The launcher could not deliver that restart either, because `npm start` hit
+`EADDRINUSE` against the server still holding the port and died before printing
+anything — the "flashes open then closes" symptom, a *different* cause from the
+earlier CRLF bug. `server.on("error")` now resolves the running instance
+through `~/.claude-cli-studio/runtime.json` (pid, port, origin, launch nonce),
+confirms it with the unauthenticated `/api/ping`, opens *that* one in the
+browser and exits 0. `runtime.json` is written only after `listen` succeeds so
+a loser never clobbers the winner, and stale `launch-<pid>` directories from
+killed servers are pruned at startup.
+
+The `SawCap` rule is carried over verbatim and is just as load-bearing here: a
+queued turn is released only after an observed capped -> lifted transition.
+Arming while uncapped must keep waiting, never fire. `src/turn-queue.mjs` keeps
+one turn per session and `drain()`s in one step so a second lift signal cannot
+double-send. Queued turns are in memory only — deliberately, so draft prompts
+never land on disk in a second place with a different lifetime.
+
 ## Conventions / gotchas
 
 - Pure Windows PowerShell 5.1 + WinForms. **No external modules** (toasts use the
@@ -115,6 +215,21 @@ have advanced the conversation into a new jsonl).
   plus `-5h-utilization` and `-7d-*` (weekly) that mirror the Usage panel. The
   OAuth call needs the `anthropic-beta: oauth-2025-04-20` header. If Anthropic
   renames these headers, that is the knob to tune.
+- **`5h-status: rejected` does NOT by itself mean you are capped.** Verified
+  live 2026-07-27: `5h-status: rejected` with `5h-utilization: 1.0` came back on
+  an **HTTP 200**, because `overage-in-use: true` and `overage-status: allowed`
+  — the window was spent but overage credits were paying for the request. A cap
+  is "work is actually being refused": HTTP 429, or a window says `rejected`
+  and no overage is covering it. Anything else that reports a status (including
+  `allowed_warning`) is still letting work through. Both tools implement this —
+  `classifyProbe` in `claudewebui/src/limit-watch.mjs` and the classification
+  block in `Start-Probe`. **Keep the two in sync.** The earlier naive
+  `-ne 'allowed'` test reported capped whenever overage was carrying you, which
+  would resume every project at the next window rollover for no reason.
+- The tool also waits on **whichever window is blocking** — `-7d-reset` when the
+  weekly cap is the one rejecting work, not always `-5h-reset`.
+- **`-utilization` is a fraction, not a percent.** `0.09` is 9%, `1.0` is a
+  spent window. Multiply by 100 before showing it.
 - The OAuth token is at `~/.claude/.credentials.json` under
   `claudeAiOauth.accessToken`. Read-only — see "Do not write to .credentials.json".
 - After editing, syntax-check with

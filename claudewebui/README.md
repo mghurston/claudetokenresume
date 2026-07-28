@@ -19,6 +19,8 @@ reimplements.
 - In-app approval for file edits, commands, and network access
 - Permission modes: Ask, Plan, Accept edits, Autopilot
 - Model and effort pickers, per message
+- Queue a message to send itself when your usage limit resets
+- Live 5-hour and weekly usage meter in the sidebar
 - Rename and delete sessions — both write through to the real transcript
 - Light/dark themes, responsive layout
 
@@ -28,6 +30,18 @@ reimplements.
 - **Claude Code** installed and logged in (`claude /login`)
 
 ## Install and run
+
+Double-click **`Claude Studio.cmd`** (Windows) or **`Claude Studio.command`**
+(macOS) in the folder above this one. Either one installs dependencies on first
+run, starts the server, and opens your browser. Close the window to stop it.
+
+On macOS, Finder needs the executable bit once:
+
+```bash
+chmod +x "Claude Studio.command"
+```
+
+Or from a terminal:
 
 ```bash
 cd claudewebui
@@ -78,10 +92,80 @@ flip the whole session into a looser permission mode are dropped — it can stop
 Claude asking about *that tool*, never about everything.
 
 Autopilot (`bypassPermissions`) skips prompts entirely, and the composer note
-turns red while it is on. Use it only in folders you trust.
+turns red while it is on. You can switch into or out of it mid-conversation —
+the mode applies from your next message. Use it only in folders you trust.
 
 `AskUserQuestion` is disabled, so Claude asks follow-up questions as ordinary
 chat messages instead of stalling on a dialog the browser cannot render.
+
+## Slash commands
+
+Type them in the composer as you would in the terminal. `/context`, `/model`,
+`/usage`, `/compact`, your own skills and plugin commands all reach the CLI as
+ordinary prompt text and answer in the conversation.
+
+Three account commands are Studio's own, because the CLI reserves them for the
+interactive terminal and answers "isn't available in this environment" if you
+send them through:
+
+| Command | What it does |
+| --- | --- |
+| `/login` | Runs Claude Code's OAuth flow and opens the authorize page. The card finishes by itself when you approve, or you can paste the `code#state` from the manual page. |
+| `/whoami` | Shows the account, plan, and organization the CLI is using |
+| `/logout` | Points you at `claude /logout` — there is no logout control request, and Studio will not edit your credentials file itself |
+
+`/login` reaches the CLI through control requests that are not part of the
+SDK's published types, so a future SDK release could remove them. If that
+happens, the card says so and tells you to run `claude /login` in a terminal
+instead of failing obscurely.
+
+## Typing while Claude works
+
+You don't have to wait for a turn to finish. Keep typing and send — the message
+shows up greyed out with a **Queued** tag and runs the moment the current turn
+ends. Same as the terminal.
+
+`/btw <something>` interjects instead of waiting. The note folds into the turn
+already running, so the answer accounts for what you just said — use it to
+redirect Claude mid-flight ("/btw skip the tests for now"). It only applies
+while something is running.
+
+Both ride the CLI's own command queue, so a queued message behaves exactly as it
+does in the terminal. One limitation: a queued message **cannot be cancelled**.
+The CLI protocol supports it but the Agent SDK does not expose the call, so
+there is no honest Cancel button to offer. **Stop** aborts the running turn; a
+message already queued behind it still runs.
+
+## Waiting out the usage limit
+
+Hit your limit mid-thought? Write the message you want run next, click **Queue
+for reset**, and send. Nothing goes out; the turn parks, and the note under the
+composer counts down to the reset. When the window turns over, Studio sends it
+into that same conversation and the answer streams in like any other turn — no
+terminal window, no separate tool.
+
+Queue as many conversations as you like. One reset releases all of them, each
+with its own message, each in its own project folder.
+
+- **It only fires after a real cap.** Arming while your limit is fine is fine —
+  the turn simply waits until you actually hit a limit and it lifts. It will
+  never fire just because you happen to be under the limit right now.
+- **The banner always names the permission mode** the queued turn will run
+  under, because it fires while you are not watching.
+- **One queued turn per conversation.** Queueing again replaces it, so a waking
+  session can't fire a backlog.
+- **Cancel any time** from the composer note, or by deleting the conversation.
+- Queued turns live in memory. Restarting the server clears them.
+
+The sidebar meter shows how much of the 5-hour and weekly windows you have used.
+It reads the rate-limit information Claude Code already reports on any live
+session, which costs nothing. Studio only makes its own limit check while
+something is queued and no session is running to report in — and that check is a
+1-token request that is free while you're capped.
+
+Note that a spent 5-hour window is not always a cap: if your account has overage
+credits and they're covering the request, work keeps flowing and nothing is
+queued or released. The meter shows "on overage" when that's happening.
 
 ## Attachments
 
@@ -102,11 +186,15 @@ the terminal.
 ## Data and security
 
 - Binds to `127.0.0.1`; it is not exposed to the network.
-- Each launch mints a one-time nonce, exchanged for a session token held in
-  port-scoped `sessionStorage`, so other local services and OS users cannot
-  drive your Claude sessions or approve actions.
+- The launcher mints a nonce in a mode-`0700` directory, exchanged for a
+  session token held in port-scoped `localStorage`, so other local services and
+  OS users cannot drive your Claude sessions or approve actions. The nonce stays
+  redeemable for as long as that server runs, so reopening the tab works; it
+  dies with the server, and a token from an earlier run gets you a sign-in card
+  rather than a dead page.
 - No credentials are copied or stored. Studio launches your locally installed
-  Claude Code, which uses your existing login.
+  Claude Code, which uses your existing login. `/login` asks the CLI to run its
+  own OAuth flow; Studio never reads or writes `~/.claude/.credentials.json`.
 - Studio's own organization data (scan roots, projects, manual moves) and
   uploads live in `~/.claude-cli-studio`.
 - Deleting a conversation deletes the real transcript file. It cannot be undone.
@@ -120,12 +208,14 @@ the terminal.
 | `CLAUDE_STUDIO_PORT` | Local HTTP port; defaults to `4174` |
 | `CLAUDE_STUDIO_DATA_DIR` | Studio state and upload directory |
 | `CLAUDE_STUDIO_OPEN=0` | Do not open the browser automatically |
-| `CLAUDE_STUDIO_TOKEN` | Advanced: fixed one-time launch nonce when browser opening is disabled |
+| `CLAUDE_STUDIO_TOKEN` | Advanced: fixed launch nonce when browser opening is disabled |
 | `CLAUDE_CODE_PATH` | Claude Code executable used for the version check |
 
 With `CLAUDE_STUDIO_OPEN=0`, Studio prints the path to a mode-`0600` launch
-file. Open it in the intended browser within two minutes; the nonce is consumed
-once and the file is deleted.
+file. Open it in the intended browser; it stays valid until the server stops.
+
+Starting Studio a second time while one is already running does not fail —
+it opens the running one in your browser and exits.
 
 ## Architecture
 

@@ -1,11 +1,21 @@
+/**
+ * The Studio token is kept in localStorage, not sessionStorage.
+ *
+ * sessionStorage dies with the tab, and the launch handoff used to be
+ * single-use — so closing the tab and reopening 127.0.0.1 left the app 401ing
+ * with no way to authenticate. localStorage survives the tab; the server keeps
+ * its launch route redeemable so a restarted server can re-issue.
+ */
+const TOKEN_KEY = "claude-cli-studio-token";
 const launchToken = new URLSearchParams(window.location.hash.slice(1)).get(
   "studio-token",
 );
 if (launchToken) {
-  sessionStorage.setItem("claude-cli-studio-token", launchToken);
+  localStorage.setItem(TOKEN_KEY, launchToken);
   history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
 }
-const studioToken = sessionStorage.getItem("claude-cli-studio-token") || "";
+let studioToken =
+  launchToken || localStorage.getItem(TOKEN_KEY) || sessionStorage.getItem(TOKEN_KEY) || "";
 
 const state = {
   bootstrap: null,
@@ -29,6 +39,11 @@ const state = {
   currentPermission: null,
   permissionQueue: [],
   collapsedProjects: new Set(),
+  limit: null,
+  queue: [],
+  queueForReset: false,
+  pendingMessages: new Map(),
+  suggestion: null,
 };
 
 const elements = {
@@ -49,8 +64,18 @@ const elements = {
   deleteButton: document.querySelector("#deleteButton"),
   denyPermissionButton: document.querySelector("#denyPermissionButton"),
   dropOverlay: document.querySelector("#dropOverlay"),
+  signinOverlay: document.querySelector("#signinOverlay"),
+  signinReason: document.querySelector("#signinReason"),
+  signinRetry: document.querySelector("#signinRetry"),
   effortSelect: document.querySelector("#effortSelect"),
   fileInput: document.querySelector("#fileInput"),
+  ghostSuggestion: document.querySelector("#ghostSuggestion"),
+  ghostText: document.querySelector("#ghostText"),
+  limitBar: document.querySelector("#limitBar"),
+  limitDetail: document.querySelector("#limitDetail"),
+  limitLabel: document.querySelector("#limitLabel"),
+  limitMeter: document.querySelector("#limitMeter"),
+  limitValue: document.querySelector("#limitValue"),
   messageInput: document.querySelector("#messageInput"),
   messages: document.querySelector("#messages"),
   modeSelect: document.querySelector("#modeSelect"),
@@ -87,6 +112,7 @@ const elements = {
   themeButton: document.querySelector("#themeButton"),
   toastRegion: document.querySelector("#toastRegion"),
   uploadStatus: document.querySelector("#uploadStatus"),
+  watchButton: document.querySelector("#watchButton"),
   welcome: document.querySelector("#welcome"),
 };
 
@@ -156,12 +182,38 @@ async function api(url, options = {}) {
   const response = await fetch(url, requestOptions);
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
+    if (response.status === 401) {
+      showSigninOverlay(
+        studioToken
+          ? "The token this tab holds belongs to an earlier run of the server."
+          : "This tab was opened without a Studio token.",
+      );
+    }
     const error = new Error(payload.error || `Request failed with status ${response.status}.`);
     error.status = response.status;
     throw error;
   }
   return payload;
 }
+
+/**
+ * A 401 means the token is stale or absent, and the browser cannot mint a new
+ * one — only the server can, through the launch handoff. So drop the dead
+ * token and say plainly what to do, instead of leaving a dead-looking UI.
+ */
+function showSigninOverlay(reason) {
+  if (studioToken) {
+    localStorage.removeItem(TOKEN_KEY);
+    sessionStorage.removeItem(TOKEN_KEY);
+    studioToken = "";
+  }
+  elements.signinReason.textContent = reason;
+  elements.signinOverlay.classList.remove("hidden");
+}
+
+elements.signinRetry?.addEventListener("click", () => {
+  window.location.reload();
+});
 
 function showToast(message, type = "info") {
   const toast = document.createElement("div");
@@ -305,7 +357,71 @@ function renderPermissionModes() {
   updateComposerNote();
 }
 
+function modeName(modeId) {
+  return (
+    (state.bootstrap?.permissionModes || []).find((item) => item.id === modeId)?.name ||
+    modeId
+  );
+}
+
+function queuedTurnFor(sessionId) {
+  return state.queue.find((entry) => entry.sessionId === sessionId) || null;
+}
+
+function formatClockTime(epochMs) {
+  return new Date(epochMs).toLocaleTimeString([], {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function formatCountdown(epochMs) {
+  const remaining = Math.max(0, epochMs - Date.now());
+  const minutes = Math.round(remaining / 60000);
+  if (minutes < 1) {
+    return "any moment";
+  }
+  if (minutes < 60) {
+    return `${minutes} min`;
+  }
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${minutes % 60}m`;
+}
+
+/**
+ * The note under the composer carries three things, most urgent first: a turn
+ * parked for this conversation, the Autopilot warning, then the plain
+ * description of the selected mode.
+ *
+ * A queued turn always states the permission mode it will run under. It fires
+ * unattended, possibly hours later, so "what is it allowed to do when it wakes
+ * up" must never be something you have to remember.
+ */
 function updateComposerNote() {
+  const queued = state.activeSessionId ? queuedTurnFor(state.activeSessionId) : null;
+  elements.composerNote.classList.remove("warning", "queued");
+
+  if (queued) {
+    const reset = state.limit?.resetAt;
+    const when =
+      state.limit?.status === "capped" && reset
+        ? `runs at ${formatClockTime(reset)} (in ${formatCountdown(reset)})`
+        : "runs as soon as a usage window resets";
+    elements.composerNote.replaceChildren(
+      document.createTextNode(
+        `Queued — ${when}, using ${modeName(queued.permissionMode)}. `,
+      ),
+    );
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "link-button";
+    cancel.dataset.cancelQueued = queued.sessionId;
+    cancel.textContent = "Cancel";
+    elements.composerNote.append(cancel);
+    elements.composerNote.classList.add("queued");
+    return;
+  }
+
   const mode = (state.bootstrap?.permissionModes || []).find(
     (item) => item.id === elements.modeSelect.value,
   );
@@ -317,6 +433,95 @@ function updateComposerNote() {
     "warning",
     elements.modeSelect.value === "bypassPermissions",
   );
+}
+
+function updateWatchButton() {
+  elements.watchButton.classList.toggle("active", state.queueForReset);
+  elements.watchButton.setAttribute("aria-pressed", String(state.queueForReset));
+}
+
+/**
+ * The 5-hour window is what actually gates work, so it drives the bar; the
+ * weekly number rides along as detail text when the CLI reports it.
+ */
+function renderLimitMeter() {
+  const limit = state.limit;
+  const utilization = typeof limit?.utilization === "number" ? limit.utilization : null;
+  const capped = limit?.status === "capped";
+
+  if (!limit || (utilization === null && !capped)) {
+    elements.limitMeter.classList.add("hidden");
+    return;
+  }
+  elements.limitMeter.classList.remove("hidden");
+  elements.limitMeter.classList.toggle("capped", capped);
+
+  const percent = capped ? 100 : Math.max(0, Math.min(100, Math.round(utilization)));
+  elements.limitLabel.textContent = capped ? "Usage limit reached" : "5-hour usage";
+  elements.limitValue.textContent = capped
+    ? limit.resetAt
+      ? `resets ${formatClockTime(limit.resetAt)}`
+      : "waiting for reset"
+    : `${percent}%`;
+  elements.limitBar.style.width = `${percent}%`;
+
+  const details = [];
+  if (typeof limit.weeklyUtilization === "number") {
+    details.push(`Weekly ${Math.round(limit.weeklyUtilization)}%`);
+  }
+  if (limit.usingOverage) {
+    details.push("on overage");
+  }
+  if (state.queue.length) {
+    details.push(
+      `${state.queue.length} turn${state.queue.length === 1 ? "" : "s"} queued`,
+    );
+  }
+  if (limit.polling) {
+    details.push("watching");
+  }
+  elements.limitDetail.textContent = details.join(" · ");
+}
+
+function applyWatchState({ limit, queue }) {
+  if (limit) {
+    state.limit = limit;
+  }
+  if (Array.isArray(queue)) {
+    state.queue = queue;
+  }
+  renderLimitMeter();
+  updateComposerNote();
+  renderSidebar();
+}
+
+async function cancelQueuedTurn(sessionId) {
+  try {
+    await api(`/api/watch/queue/${sessionId}`, { method: "DELETE" });
+    state.queue = state.queue.filter((entry) => entry.sessionId !== sessionId);
+    applyWatchState({});
+    showToast("Queued message cancelled.");
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
+
+/**
+ * Best-effort desktop notification when parked work wakes up. The tab is often
+ * in the background for hours by then, which is the whole point.
+ */
+function notifyReleased(released) {
+  const count = released.length;
+  const body =
+    count === 1
+      ? released[0].prompt.slice(0, 120)
+      : `${count} conversations picked up where they left off.`;
+  showToast(
+    count === 1 ? "Usage window reset — your queued message was sent." : `Usage window reset — ${count} queued messages sent.`,
+  );
+  if (window.Notification?.permission === "granted") {
+    new Notification("Claude picked up your queued work", { body });
+  }
 }
 
 function renderSidebar() {
@@ -409,6 +614,14 @@ function renderSidebar() {
         meta.className = "session-item-meta";
         meta.textContent = formatRelativeTime(session.updatedAt);
         button.append(title, meta);
+        if (queuedTurnFor(session.id)) {
+          const badge = document.createElement("span");
+          badge.className = "session-queued-badge";
+          badge.textContent = "Queued";
+          badge.title = "Waiting for the usage window to reset";
+          button.append(badge);
+          button.classList.add("has-queued");
+        }
         list.append(button);
       }
     }
@@ -451,7 +664,7 @@ async function refreshBootstrap({ quiet = false } = {}) {
     renderModels();
     renderEfforts();
     renderPermissionModes();
-    renderSidebar();
+    applyWatchState(state.bootstrap);
     updateTopbar();
     setConnectionState();
   } catch (error) {
@@ -470,6 +683,7 @@ function startNewChat(projectId = state.activeProjectId) {
   state.navigationEpoch += 1;
   state.sessionLoadToken += 1;
   clearAttachments();
+  setSuggestion(null);
   state.activeSessionId = null;
   state.activeProjectId = projectId || "general";
   state.activeSessionTitle = "New chat";
@@ -799,17 +1013,24 @@ async function selectSession(sessionId, projectId) {
   }
 }
 
-function appendOptimisticUserMessage(prompt, attachments) {
+function appendOptimisticUserMessage(prompt, attachments, { pending = false, label = "Queued" } = {}) {
   showMessages();
-  elements.messages.append(
-    messageNode({
-      role: "user",
-      content: prompt,
-      attachments,
-      timestamp: new Date().toISOString(),
-    }),
-  );
+  const node = messageNode({
+    role: "user",
+    content: prompt,
+    attachments,
+    timestamp: new Date().toISOString(),
+  });
+  if (pending) {
+    node.classList.add("pending");
+    const tag = document.createElement("span");
+    tag.className = "pending-tag";
+    tag.textContent = label;
+    node.append(tag);
+  }
+  elements.messages.append(node);
   scrollToBottom();
+  return node;
 }
 
 function ensureLiveMessage(messageId) {
@@ -875,16 +1096,272 @@ function updateSendControls() {
       (state.runningSessions.has(state.activeSessionId) ||
         state.pendingSessionSends.has(state.activeSessionId)),
   );
-  state.sending = activeRunning || state.pendingNavigationSends.has(state.navigationEpoch);
+  // A running turn no longer blocks the composer — typing ahead is queued the
+  // way the terminal queues it. Only a brand-new chat that has not come back
+  // with a session id yet has nowhere to put the message.
+  state.sending = state.pendingNavigationSends.has(state.navigationEpoch);
   elements.sendButton.classList.toggle("hidden", state.sending);
   elements.stopButton.classList.toggle("hidden", !activeRunning);
   elements.sendButton.disabled = state.uploading > 0;
+  elements.messageInput.placeholder = activeRunning
+    ? "Send another message — it runs when this turn finishes (/btw to interject)"
+    : "Ask anything, use /commands, or drop several files here…";
 }
+
+/**
+ * The CLI's suggested next prompt, shown the way the terminal shows it: ghost
+ * text you take with Tab. It only appears while the composer is empty, so it
+ * can never get in the way of something you are actually writing.
+ */
+function setSuggestion(suggestion) {
+  state.suggestion = suggestion || null;
+  renderSuggestion();
+}
+
+function renderSuggestion() {
+  const visible = Boolean(state.suggestion) && elements.messageInput.value === "";
+  elements.ghostSuggestion.classList.toggle("hidden", !visible);
+  if (visible) {
+    elements.ghostText.textContent = state.suggestion;
+  }
+}
+
+function acceptSuggestion() {
+  if (!state.suggestion || elements.messageInput.value !== "") {
+    return false;
+  }
+  elements.messageInput.value = state.suggestion;
+  setSuggestion(null);
+  autoSizeTextarea();
+  elements.messageInput.focus();
+  return true;
+}
+
+/**
+ * `/btw <question>` mirrors the terminal: the note folds into the turn already
+ * running rather than waiting for it, so the answer accounts for what you said.
+ */
+function parseBtw(prompt) {
+  const match = prompt.match(/^\/btw\b\s*([\s\S]*)$/i);
+  if (!match) {
+    return null;
+  }
+  return match[1].trim();
+}
+
+/**
+ * Renders a Studio-side card into the transcript — used for the commands the
+ * CLI answers for the terminal rather than for us.
+ */
+function systemCardNode(title) {
+  const article = document.createElement("article");
+  article.className = "message assistant";
+  const avatar = document.createElement("div");
+  avatar.className = "message-avatar";
+  avatar.append(iconNode("robot"));
+  const body = document.createElement("div");
+  body.className = "message-body";
+  const card = document.createElement("div");
+  card.className = "system-card";
+  const heading = document.createElement("strong");
+  heading.textContent = title;
+  card.append(heading);
+  body.append(card);
+  article.append(avatar, body);
+  showMessages();
+  elements.messages.append(article);
+  scrollToBottom();
+  return card;
+}
+
+function describeAccount(account) {
+  if (!account?.email) {
+    return "Signed in.";
+  }
+  const plan = account.subscriptionType ? ` · ${account.subscriptionType}` : "";
+  const org = account.organization ? ` · ${account.organization}` : "";
+  return `Signed in as ${account.email}${plan}${org}`;
+}
+
+/**
+ * `/login` cannot be forwarded to the CLI: it is not in the SDK's command list,
+ * and sending it verbatim just gets "/login isn't available in this
+ * environment" because the flow belongs to the interactive terminal. Studio
+ * drives the same OAuth exchange itself over the control channel instead.
+ */
+async function runLoginCommand() {
+  const card = systemCardNode("Sign in to Claude");
+  const status = document.createElement("p");
+  status.textContent = "Starting the sign-in flow…";
+  card.append(status);
+
+  let urls;
+  try {
+    urls = await api("/api/auth/login", { method: "POST" });
+  } catch (error) {
+    status.textContent = error.message;
+    return;
+  }
+
+  const target = urls.automaticUrl || urls.manualUrl;
+  if (!target) {
+    status.textContent = "Claude Code did not return an authorization URL.";
+    return;
+  }
+
+  status.textContent =
+    "Approve the sign-in in the tab that just opened. This card updates by itself when you are done.";
+
+  const openLink = document.createElement("a");
+  openLink.className = "primary button-link";
+  openLink.href = target;
+  openLink.target = "_blank";
+  openLink.rel = "noopener noreferrer";
+  openLink.textContent = "Open the authorization page";
+  card.append(openLink);
+  window.open(target, "_blank", "noopener");
+
+  // Manual fallback, for when the CLI's loopback listener cannot be reached
+  // (a different browser profile, a redirect that never lands).
+  const manual = document.createElement("details");
+  manual.className = "system-card-manual";
+  const summary = document.createElement("summary");
+  summary.textContent = "Paste the code instead";
+  const manualRow = document.createElement("div");
+  manualRow.className = "system-card-row";
+  const codeInput = document.createElement("input");
+  codeInput.type = "text";
+  codeInput.placeholder = "code#state";
+  codeInput.autocomplete = "off";
+  codeInput.spellcheck = false;
+  const submit = document.createElement("button");
+  submit.type = "button";
+  submit.className = "primary";
+  submit.textContent = "Submit";
+  manualRow.append(codeInput, submit);
+  if (urls.manualUrl) {
+    const manualLink = document.createElement("a");
+    manualLink.href = urls.manualUrl;
+    manualLink.target = "_blank";
+    manualLink.rel = "noopener noreferrer";
+    manualLink.textContent = "Open the manual authorization page";
+    manual.append(summary, manualLink, manualRow);
+  } else {
+    manual.append(summary, manualRow);
+  }
+  card.append(manual);
+
+  const fallbackState = (() => {
+    try {
+      return new URL(urls.manualUrl || target).searchParams.get("state");
+    } catch {
+      return null;
+    }
+  })();
+
+  let settled = false;
+  const finish = (account) => {
+    settled = true;
+    card.replaceChildren();
+    const heading = document.createElement("strong");
+    heading.textContent = "Signed in";
+    const detail = document.createElement("p");
+    detail.textContent = describeAccount(account);
+    card.append(heading, detail);
+    scrollToBottom();
+    showToast("Signed in to Claude.");
+  };
+
+  const complete = async (body) => {
+    const result = await api("/api/auth/complete", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    if (!settled) {
+      finish(result.account);
+    }
+  };
+
+  submit.addEventListener("click", async () => {
+    const pasted = codeInput.value.trim();
+    if (!pasted) {
+      return;
+    }
+    // The manual page hands back `code#state`; accept a bare code too.
+    const [code, pastedState] = pasted.split("#");
+    submit.disabled = true;
+    try {
+      await complete({ code: code.trim(), state: (pastedState || fallbackState || "").trim() });
+    } catch (error) {
+      status.textContent = error.message;
+      submit.disabled = false;
+    }
+  });
+
+  // Meanwhile, wait on the CLI's own loopback listener. Whichever path lands
+  // first wins; `settled` keeps the other from redrawing the card.
+  complete({}).catch((error) => {
+    if (!settled) {
+      status.textContent = `${error.message} You can still paste the code below.`;
+      manual.open = true;
+    }
+  });
+}
+
+/**
+ * There is no logout control request in the SDK, and Studio will not delete
+ * `~/.claude/.credentials.json` itself — the CLI rotates refresh tokens and
+ * owns that file. So say where to do it rather than half-doing it here.
+ */
+function runLogoutCommand() {
+  const card = systemCardNode("Signing out happens in the terminal");
+  const detail = document.createElement("p");
+  detail.textContent =
+    "Claude Code does not expose logout to Studio, and Studio will not edit your credentials file itself. Run `claude /logout` in a terminal, then use /login here to sign back in.";
+  card.append(detail);
+}
+
+async function runWhoamiCommand() {
+  const card = systemCardNode("Claude account");
+  const detail = document.createElement("p");
+  detail.textContent = "Checking…";
+  card.append(detail);
+  try {
+    const { account } = await api("/api/auth");
+    detail.textContent = account
+      ? describeAccount(account)
+      : "Claude Code could not report an account. Use /login to sign in.";
+  } catch (error) {
+    detail.textContent = error.message;
+  }
+}
+
+/**
+ * Account commands Studio answers itself. Everything else — /context, /model,
+ * /usage, /compact and the rest — already reaches the CLI as ordinary prompt
+ * text and comes back as an assistant message, so it is deliberately not
+ * intercepted here.
+ */
+const studioCommands = new Map([
+  ["/login", runLoginCommand],
+  ["/logout", runLogoutCommand],
+  ["/whoami", runWhoamiCommand],
+]);
 
 async function sendMessage() {
   const prompt = elements.messageInput.value.trim();
   const readyAttachments = state.attachments.filter((attachment) => attachment.id);
   if ((!prompt && readyAttachments.length === 0) || state.sending || state.uploading > 0) {
+    return;
+  }
+
+  // Account commands are Studio's to run, not the CLI's — take them before any
+  // of the send bookkeeping so they cost no turn and no session.
+  const studioCommand = studioCommands.get(prompt.toLowerCase());
+  if (studioCommand) {
+    elements.messageInput.value = "";
+    autoSizeTextarea();
+    await studioCommand();
     return;
   }
 
@@ -901,7 +1378,61 @@ async function sendMessage() {
     kind,
   }));
 
-  appendOptimisticUserMessage(displayPrompt, attachmentMetadata);
+  // A queued turn is not in flight, so it gets none of the optimistic "running"
+  // bookkeeping — the composer just empties and the note explains the wait.
+  if (state.queueForReset) {
+    try {
+      const result = await api("/api/messages", {
+        method: "POST",
+        body: JSON.stringify({
+          sessionId: originalSessionId,
+          projectId: originalProjectId,
+          prompt,
+          uploadIds,
+          model: elements.modelSelect.value || null,
+          effort: elements.effortSelect.value || null,
+          permissionMode: elements.modeSelect.value,
+          queueForReset: true,
+        }),
+      });
+      elements.messageInput.value = "";
+      autoSizeTextarea();
+      clearAttachments({ deleteRemote: false });
+      state.queueForReset = false;
+      updateWatchButton();
+      if (originalSessionId === null && state.navigationEpoch === originEpoch) {
+        state.activeSessionId = result.sessionId;
+        state.activeSessionTitle = displayPrompt.slice(0, 72);
+        updateTopbar();
+      }
+      applyWatchState({ limit: result.limit, queue: [...state.queue, result.queued] });
+      showToast(
+        result.limit?.status === "capped" && result.limit?.resetAt
+          ? `Queued — sends at ${formatClockTime(result.limit.resetAt)}.`
+          : "Queued — sends when the usage window resets.",
+      );
+    } catch (error) {
+      showToast(error.message, "error");
+    }
+    return;
+  }
+
+  const btwNote = parseBtw(prompt);
+  const turnInFlight = Boolean(
+    originalSessionId && state.runningSessions.has(originalSessionId),
+  );
+  if (btwNote !== null && !turnInFlight) {
+    showToast("/btw interjects while Claude is working — nothing is running.");
+    return;
+  }
+  const outgoingPrompt = btwNote !== null ? btwNote : prompt;
+  // A suggestion belongs to the turn that produced it; once you send, it is stale.
+  setSuggestion(null);
+
+  const bubble = appendOptimisticUserMessage(displayPrompt, attachmentMetadata, {
+    pending: turnInFlight,
+    label: btwNote !== null ? "Interjecting" : "Queued",
+  });
   elements.messageInput.value = "";
   autoSizeTextarea();
   clearAttachments({ deleteRemote: false });
@@ -920,13 +1451,23 @@ async function sendMessage() {
       body: JSON.stringify({
         sessionId: originalSessionId,
         projectId: originalProjectId,
-        prompt,
+        prompt: outgoingPrompt,
         uploadIds,
         model: elements.modelSelect.value || null,
         effort: elements.effortSelect.value || null,
         permissionMode: elements.modeSelect.value,
+        priority: btwNote !== null ? "now" : null,
       }),
     });
+
+    // Tag the bubble so session.pending_cleared can promote it when the CLI
+    // takes the message off its queue.
+    if (result.queued && result.messageUuid && bubble) {
+      bubble.dataset.pendingUuid = result.messageUuid;
+      state.pendingMessages.set(result.sessionId, result.messageUuid);
+    } else if (bubble) {
+      bubble.classList.remove("pending");
+    }
 
     state.pendingNavigationSends.delete(originEpoch);
     if (originalSessionId) {
@@ -1185,6 +1726,22 @@ function handleClaudeEvent(payload) {
       updateSendControls();
     }
   }
+  if (event.type === "session.suggestion" && sessionId === state.activeSessionId) {
+    setSuggestion(event.data?.suggestion);
+    return;
+  }
+
+  // The parked message has been taken off the CLI's queue and is running now,
+  // so its pending bubble becomes an ordinary one.
+  if (event.type === "session.pending_cleared") {
+    for (const messageUuid of event.data?.messageUuids || []) {
+      document
+        .querySelector(`[data-pending-uuid="${messageUuid}"]`)
+        ?.classList.remove("pending");
+    }
+    state.pendingMessages.delete(sessionId);
+  }
+
   const terminalEvent = event.type === "session.idle" || event.type === "session.error";
   if (terminalEvent) {
     state.terminalSessions.add(sessionId);
@@ -1296,11 +1853,27 @@ function handleStreamPayload(payload) {
       }
     }
     updateSendControls();
+    applyWatchState(payload);
   } else if (payload.type === "claude-event") {
     handleClaudeEvent(payload);
   } else if (payload.type === "permission-request") {
     enqueuePermission(payload);
   } else if (payload.type === "sessions-changed") {
+    setTimeout(() => refreshBootstrap({ quiet: true }), 300);
+  } else if (payload.type === "watch-changed") {
+    applyWatchState(payload);
+  } else if (payload.type === "watch-released") {
+    for (const item of payload.released || []) {
+      state.runningSessions.add(item.sessionId);
+      state.terminalSessions.delete(item.sessionId);
+    }
+    for (const item of payload.failed || []) {
+      showToast(`Queued message could not be sent: ${item.error}`, "error");
+    }
+    if (payload.released?.length) {
+      notifyReleased(payload.released);
+    }
+    updateSendControls();
     setTimeout(() => refreshBootstrap({ quiet: true }), 300);
   }
 }
@@ -1376,18 +1949,48 @@ elements.closeSidebarButton.addEventListener("click", closeSidebar);
 elements.sidebarBackdrop.addEventListener("click", closeSidebar);
 elements.sessionSearch.addEventListener("input", renderSidebar);
 elements.modeSelect.addEventListener("change", updateComposerNote);
+elements.watchButton.addEventListener("click", () => {
+  state.queueForReset = !state.queueForReset;
+  updateWatchButton();
+  if (state.queueForReset) {
+    // Ask the first time it is armed, not on page load — the permission prompt
+    // makes sense once you have said you want to be told about something.
+    if (window.Notification?.permission === "default") {
+      Notification.requestPermission().catch(() => {});
+    }
+    showToast("This message will wait for the usage window to reset.");
+  }
+});
+elements.composerNote.addEventListener("click", (event) => {
+  const sessionId = event.target.closest("[data-cancel-queued]")?.dataset.cancelQueued;
+  if (sessionId) {
+    cancelQueuedTurn(sessionId);
+  }
+});
 elements.attachButton.addEventListener("click", () => elements.fileInput.click());
 elements.fileInput.addEventListener("change", () => {
   uploadFiles(elements.fileInput.files);
   elements.fileInput.value = "";
 });
-elements.messageInput.addEventListener("input", autoSizeTextarea);
+elements.messageInput.addEventListener("input", () => {
+  autoSizeTextarea();
+  renderSuggestion();
+});
 elements.messageInput.addEventListener("keydown", (event) => {
+  if (event.key === "Tab" && !event.shiftKey && acceptSuggestion()) {
+    event.preventDefault();
+    return;
+  }
+  if (event.key === "Escape" && state.suggestion) {
+    setSuggestion(null);
+    return;
+  }
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
     sendMessage();
   }
 });
+elements.ghostSuggestion.addEventListener("click", acceptSuggestion);
 elements.sendButton.addEventListener("click", sendMessage);
 elements.stopButton.addEventListener("click", async () => {
   if (!state.activeSessionId) return;
@@ -1626,6 +2229,15 @@ window.addEventListener("drop", (event) => {
   elements.dropOverlay.classList.add("hidden");
   uploadFiles(event.dataTransfer.files);
 });
+
+// The queued banner counts down to the reset, so redraw it while anything is
+// parked. Idle cost is one comparison a minute.
+setInterval(() => {
+  if (state.queue.length) {
+    updateComposerNote();
+    renderLimitMeter();
+  }
+}, 60 * 1000);
 
 initializeTheme();
 connectEventStream();

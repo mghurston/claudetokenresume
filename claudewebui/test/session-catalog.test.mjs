@@ -1,6 +1,24 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { normalizeMessage } from "../src/session-catalog.mjs";
+import { isSessionId, normalizeMessage } from "../src/session-catalog.mjs";
+
+test("only real session ids are accepted", () => {
+  assert.equal(isSessionId("93906006-12fc-4f63-8e02-662649efab68"), true);
+  assert.equal(isSessionId("93906006-12FC-4F63-8E02-662649EFAB68"), true);
+
+  // A session id becomes a transcript filename, so anything that could create a
+  // junk conversation — or escape the directory — has to be turned away.
+  assert.equal(isSessionId("undefined"), false);
+  assert.equal(isSessionId("null"), false);
+  assert.equal(isSessionId(""), false);
+  assert.equal(isSessionId("../../etc/passwd"), false);
+  assert.equal(isSessionId("93906006-12fc-4f63-8e02-662649efab68.jsonl"), false);
+  assert.equal(isSessionId("93906006-12fc-4f63-8e02"), false);
+  assert.equal(isSessionId("g3906006-12fc-4f63-8e02-662649efab68"), false);
+  assert.equal(isSessionId(undefined), false);
+  assert.equal(isSessionId(null), false);
+  assert.equal(isSessionId(12345), false);
+});
 
 function userEntry(content, extra = {}) {
   return {

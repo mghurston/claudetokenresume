@@ -15,6 +15,20 @@ import {
  * an SDK upgrade carries the fix.
  */
 
+/**
+ * Session ids are UUIDs — both the ones Claude Code generates and the ones
+ * Studio mints for a new chat. Anything else is a malformed client, and letting
+ * it through means the id becomes a filename: a request carrying the literal
+ * string "undefined" would create `undefined.jsonl` in the transcript store and
+ * a junk conversation in the sidebar. Validate at the edge instead.
+ */
+const SESSION_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function isSessionId(value) {
+  return typeof value === "string" && SESSION_ID_PATTERN.test(value);
+}
+
 // A single message carrying more inline image data than this is summarized
 // instead of inlined, so one screenshot-heavy turn cannot bloat the transcript
 // response into tens of megabytes.

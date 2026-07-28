@@ -322,10 +322,13 @@ function Stop-Watch([string]$status) {
 # off a minimal /v1/messages call. Runs in a background job (keeps the UI free)
 # and emits a one-line JSON result: { status; reset; http; detail }.
 #   status: 'capped' | 'lifted' | 'unknown'
-#   reset : unix secs the 5h window resets (from anthropic-ratelimit-unified-5h-*)
+#   reset : unix secs the blocking window resets (5h, or 7d if that is the one
+#           actually rejecting work)
 # While capped the call is rejected with HTTP 429 (no token cost) but the reset
 # header is still present, so we learn exactly when to resume. An expired token
 # yields 401 -> 'unknown'; callers fall back to the reset time learned earlier.
+# 'capped' means work is being REFUSED, which is not the same as a spent window
+# - see the overage note on the classification below.
 function Start-Probe {
     $script:Phase = 'probing'
     $lblStatus.Text = "Checking the limit..."
@@ -358,16 +361,42 @@ function Start-Probe {
             try { foreach ($k in $resp.Headers.AllKeys) { $H[$k] = "$($resp.Headers[$k])" } } catch { }
         }
 
-        $st = $H['anthropic-ratelimit-unified-5h-status']
+        $st  = $H['anthropic-ratelimit-unified-5h-status']
         if (-not $st) { $st = $H['anthropic-ratelimit-unified-status'] }
-        $rs = $H['anthropic-ratelimit-unified-5h-reset']
-        if (-not $rs) { $rs = $H['anthropic-ratelimit-unified-reset'] }
+        $wk  = $H['anthropic-ratelimit-unified-7d-status']
+        $ovU = $H['anthropic-ratelimit-unified-overage-in-use']
+        $ovS = $H['anthropic-ratelimit-unified-overage-status']
+
+        # Wait on whichever window is actually holding work up.
+        if ($st -ieq 'rejected' -or -not ($wk -ieq 'rejected')) {
+            $rs = $H['anthropic-ratelimit-unified-5h-reset']
+            if (-not $rs) { $rs = $H['anthropic-ratelimit-unified-reset'] }
+        } else {
+            $rs = $H['anthropic-ratelimit-unified-7d-reset']
+        }
         if ($rs -match '^\d+$') { $r.reset = [long]$rs }
 
-        if     ($st)            { $r.status = if ($st -ieq 'allowed') { 'lifted' } else { 'capped' } }
-        elseif ($r.http -eq 429){ $r.status = 'capped' }
-        elseif ($r.http -eq 200){ $r.status = 'lifted' }
-        $r.detail = "http=$($r.http) 5h-status=$st reset=$rs"
+        # A spent window is NOT a cap on its own. Verified live 2026-07-27:
+        # 5h-status 'rejected' with 5h-utilization 1.0 came back on an HTTP 200,
+        # because overage-in-use was true and overage-status allowed - credits
+        # were paying for the call and work was still flowing. Treating that as
+        # a cap would arm against a limit that was never hit and then resume
+        # every project at the next window rollover for no reason.
+        #
+        # A cap means work is actually being REFUSED: HTTP 429, or a window says
+        # 'rejected' and no overage is covering it. Anything else that reports a
+        # status (including 'allowed_warning') is still letting work through.
+        $windowRejected  = ($st -ieq 'rejected') -or ($wk -ieq 'rejected')
+        $overageCarrying = ($ovU -ieq 'true') -and ($ovS -ine 'rejected')
+        if     ($r.http -eq 429) { $r.status = 'capped' }
+        elseif ($windowRejected) { $r.status = if ($overageCarrying) { 'lifted' } else { 'capped' } }
+        elseif ($st -or $wk)     { $r.status = 'lifted' }
+        elseif ($r.http -eq 200) { $r.status = 'lifted' }
+
+        # -utilization is a FRACTION (0.09 = 9%, 1.0 = window spent), not a percent.
+        $ut = $H['anthropic-ratelimit-unified-5h-utilization']
+        $up = if ($ut -match '^[\d.]+$') { "$([math]::Round([double]$ut * 100))%" } else { '-' }
+        $r.detail = "http=$($r.http) 5h=$st($up) 7d=$wk overage=$ovU/$ovS reset=$rs"
         return ($r | ConvertTo-Json -Compress)
     } -ArgumentList $credPath
     $timer.Interval = 1500   # poll the job, keep UI responsive
