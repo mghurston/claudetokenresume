@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta
+      name="description"
+      content="A local visual workspace for Claude Code CLI conversations."
+    >
+    <title>Claude CLI Studio</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" id="sidebar" aria-label="Session history">
+        <header class="sidebar-header">
+          <div class="brand">
+            <span class="brand-mark" aria-hidden="true">
+              <svg viewBox="0 0 24 24" role="img">
+                <path d="M12 2.6 4.2 19.4h3.3l1.6-3.7h5.8l1.6 3.7h3.3L12 2.6Zm-1.7 10.2L12 8.6l1.7 4.2h-3.4Z"/>
+              </svg>
+            </span>
+            <span>
+              <strong>Claude Studio</strong>
+              <small>Local Claude Code workspace</small>
+            </span>
+          </div>
+          <button class="icon-button mobile-only" id="closeSidebarButton" aria-label="Close sidebar">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="m6 6 12 12M18 6 6 18"/>
+            </svg>
+          </button>
+        </header>
+
+        <button class="new-chat-button" id="newChatButton">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 5v14M5 12h14"/>
+          </svg>
+          New chat
+          <span class="shortcut">⌘ N</span>
+        </button>
+
+        <button class="scan-local-button" id="scanLocalButton">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M3 6h7l2 2h9v11H3V6Z"/>
+            <circle cx="15.5" cy="13.5" r="2.5"/>
+            <path d="m17.4 15.4 2.1 2.1"/>
+          </svg>
+          Scan local
+          <span>Find history by folder</span>
+        </button>
+
+        <label class="search-box">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="11" cy="11" r="6.5"/>
+            <path d="m16 16 4 4"/>
+          </svg>
+          <input id="sessionSearch" type="search" placeholder="Search sessions">
+          <kbd>⌘K</kbd>
+        </label>
+
+        <div class="sidebar-section-title">
+          <span>Projects &amp; sessions</span>
+          <button class="icon-button subtle" id="addProjectButton" aria-label="Add project">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 5v14M5 12h14"/>
+            </svg>
+          </button>
+        </div>
+
+        <nav class="session-nav" id="sessionNav">
+          <div class="sidebar-loading">
+            <span></span>
+            <span></span>
+            <span></span>
+          </div>
+        </nav>
+
+        <footer class="sidebar-footer">
+          <div class="connection-row">
+            <span class="status-dot" id="statusDot"></span>
+            <span>
+              <strong id="connectionLabel">Connecting to Claude Code…</strong>
+              <small id="connectionDetail">Localhost only</small>
+            </span>
+          </div>
+          <button class="icon-button" id="themeButton" aria-label="Toggle theme">
+            <svg class="sun-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="3.5"/>
+              <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>
+            </svg>
+          </button>
+        </footer>
+      </aside>
+
+      <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
+
+      <main class="main-pane">
+        <header class="topbar">
+          <button class="icon-button mobile-only" id="openSidebarButton" aria-label="Open sidebar">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 7h16M4 12h16M4 17h16"/>
+            </svg>
+          </button>
+          <div class="conversation-heading">
+            <div class="heading-line">
+              <span class="project-pill" id="activeProjectPill">General</span>
+              <a
+                class="repo-link hidden"
+                id="activeRepoLink"
+                href="#"
+                target="_blank"
+                rel="noreferrer"
+                aria-label="Open repository"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M12 2a10 10 0 0 0-3.2 19.5c.5.1.7-.2.7-.5v-1.9c-2.8.6-3.4-1.2-3.4-1.2-.5-1.2-1.1-1.5-1.1-1.5-.9-.6.1-.6.1-.6 1 0 1.6 1 1.6 1 .9 1.6 2.4 1.1 2.9.9.1-.7.4-1.1.7-1.3-2.2-.3-4.6-1.1-4.6-5A3.9 3.9 0 0 1 6.8 8c-.1-.3-.5-1.3.1-2.7 0 0 .9-.3 2.8 1.1A9.7 9.7 0 0 1 12 6.1c.8 0 1.6.1 2.4.3 1.9-1.4 2.8-1.1 2.8-1.1.6 1.4.2 2.4.1 2.7a3.9 3.9 0 0 1 1 2.7c0 3.9-2.4 4.7-4.6 5 .4.3.7 1 .7 2v3c0 .3.2.6.7.5A10 10 0 0 0 12 2Z"/>
+                </svg>
+                Repo
+              </a>
+            </div>
+            <h1 id="conversationTitle">New chat</h1>
+          </div>
+          <div class="topbar-actions">
+            <select class="project-select" id="projectSelect" aria-label="Move conversation to project"></select>
+            <button class="icon-button hidden" id="renameButton" aria-label="Rename conversation">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="m4 20 4.2-1 10.6-10.6a2 2 0 0 0-2.8-2.8L5.4 16.2 4 20Z"/>
+                <path d="m14.5 7.1 2.8 2.8"/>
+              </svg>
+            </button>
+            <button class="icon-button danger hidden" id="deleteButton" aria-label="Delete conversation">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"/>
+              </svg>
+            </button>
+          </div>
+        </header>
+
+        <section class="conversation-area" id="conversationArea">
+          <div class="welcome" id="welcome">
+            <div class="welcome-logo" aria-hidden="true">
+              <svg viewBox="0 0 24 24">
+                <path d="M12 2.6 4.2 19.4h3.3l1.6-3.7h5.8l1.6 3.7h3.3L12 2.6Zm-1.7 10.2L12 8.6l1.7 4.2h-3.4Z"/>
+              </svg>
+            </div>
+            <h2>What are we working on?</h2>
+            <p>
+              Same Claude Code login, same CLAUDE.md, same tools and permissions you use in
+              the terminal — with your whole session history one click away.
+            </p>
+            <div class="starter-grid">
+              <button class="starter-card" data-starter="Help me think through an idea before we make any changes.">
+                <span class="starter-icon lavender">✦</span>
+                <strong>Think it through</strong>
+                <small>Explore an idea or make a plan</small>
+              </button>
+              <button class="starter-card" data-starter="Review the attached files and summarize the most important findings.">
+                <span class="starter-icon blue">↥</span>
+                <strong>Review files</strong>
+                <small>Drop several files into one chat</small>
+              </button>
+              <button class="starter-card" data-starter="Help me continue the work in this project. Start by understanding the current state.">
+                <span class="starter-icon green">⌘</span>
+                <strong>Continue a project</strong>
+                <small>Runs in the selected project folder</small>
+              </button>
+            </div>
+          </div>
+
+          <div class="messages hidden" id="messages" aria-live="polite"></div>
+        </section>
+
+        <section class="composer-wrap">
+          <div class="attachment-strip hidden" id="attachmentStrip"></div>
+          <div class="composer" id="composer">
+            <textarea
+              id="messageInput"
+              rows="1"
+              placeholder="Ask anything, use /commands, or drop several files here…"
+              aria-label="Message"
+            ></textarea>
+            <div class="composer-footer">
+              <div class="composer-controls">
+                <button class="composer-control attach-control" id="attachButton">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="m8.5 12.5 5.8-5.8a3 3 0 0 1 4.2 4.2l-7.1 7.1a5 5 0 0 1-7.1-7.1l7-7"/>
+                  </svg>
+                  Files
+                </button>
+                <input id="fileInput" type="file" multiple hidden>
+                <select class="composer-control" id="modeSelect" aria-label="Permission mode"></select>
+                <select class="composer-control model-control" id="modelSelect" aria-label="Model">
+                  <option value="">CLI default model</option>
+                </select>
+                <select class="composer-control" id="effortSelect" aria-label="Effort">
+                  <option value="" selected>Default effort</option>
+                </select>
+              </div>
+              <div class="send-controls">
+                <span class="upload-status" id="uploadStatus"></span>
+                <button class="send-button" id="sendButton" aria-label="Send message">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="m5 12 7-7 7 7M12 5v14"/>
+                  </svg>
+                </button>
+                <button class="send-button stop hidden" id="stopButton" aria-label="Stop response">
+                  <span></span>
+                </button>
+              </div>
+            </div>
+          </div>
+          <p class="composer-note" id="composerNote">
+            File edits, commands, and network access still ask for your approval.
+          </p>
+        </section>
+      </main>
+    </div>
+
+    <div class="drop-overlay hidden" id="dropOverlay">
+      <div>
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 16V4M7 9l5-5 5 5M5 14v5h14v-5"/>
+        </svg>
+        <strong>Drop files into this conversation</strong>
+        <span>Up to 12 files, 30 MB combined</span>
+      </div>
+    </div>
+
+    <dialog id="permissionDialog" class="studio-dialog">
+      <form method="dialog">
+        <header>
+          <span class="dialog-icon warning">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 3 2.8 19h18.4L12 3Z"/>
+              <path d="M12 9v4M12 16.5v.1"/>
+            </svg>
+          </span>
+          <div>
+            <h2>Claude needs permission</h2>
+            <p id="permissionIntention">Review this action before it runs.</p>
+          </div>
+        </header>
+        <pre class="permission-details" id="permissionDetails"></pre>
+        <label class="feedback-field">
+          Optional guidance if you deny this request
+          <input id="permissionFeedback" type="text" placeholder="Tell Claude what to do differently">
+        </label>
+        <footer>
+          <button class="button secondary" value="cancel" id="denyPermissionButton">Deny</button>
+          <button class="button secondary" value="cancel" id="approveSessionButton">
+            Allow for session
+          </button>
+          <button class="button primary" value="cancel" id="approveOnceButton">Allow once</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <dialog id="renameDialog" class="studio-dialog compact-dialog">
+      <form method="dialog" id="renameForm">
+        <header>
+          <div>
+            <h2>Rename conversation</h2>
+            <p>The new name is saved to the transcript, so <code>claude --resume</code> shows it too.</p>
+          </div>
+        </header>
+        <label class="feedback-field">
+          Name
+          <input id="renameInput" type="text" maxlength="120" autocomplete="off">
+        </label>
+        <footer>
+          <button class="button secondary" type="button" data-close-dialog>Cancel</button>
+          <button class="button primary" type="submit" id="saveRenameButton">Save</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <dialog id="scanDialog" class="studio-dialog compact-dialog">
+      <form method="dialog" id="scanForm">
+        <header>
+          <div>
+            <h2>Scan local Claude Code history</h2>
+            <p>
+              Enter a project folder or parent folder — for example the drive where you keep
+              your repos. Studio groups the working folders already recorded in your local
+              Claude Code history; it does not recursively read the folder.
+            </p>
+          </div>
+        </header>
+        <label class="feedback-field">
+          Absolute folder path
+          <input id="scanPathInput" type="text" autocomplete="off">
+        </label>
+        <footer>
+          <button class="button secondary" type="button" data-close-dialog>Cancel</button>
+          <button class="button primary" type="submit" id="runScanButton">Scan folder</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <dialog id="projectDialog" class="studio-dialog compact-dialog">
+      <form method="dialog" id="projectForm">
+        <header>
+          <div>
+            <h2>Add a project folder</h2>
+            <p>Folders must live beneath your home workspace or a scanned local folder.</p>
+          </div>
+        </header>
+        <label class="feedback-field">
+          Project name
+          <input id="projectNameInput" type="text" maxlength="80" autocomplete="off">
+        </label>
+        <label class="feedback-field">
+          Absolute folder path
+          <input id="projectPathInput" type="text" autocomplete="off">
+        </label>
+        <label class="feedback-field">
+          Matching keywords <span>(comma-separated, optional)</span>
+          <input id="projectKeywordsInput" type="text" autocomplete="off">
+        </label>
+        <footer>
+          <button class="button secondary" type="button" data-close-dialog>Cancel</button>
+          <button class="button primary" type="submit" id="saveProjectButton">Add project</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <div class="toast-region" id="toastRegion" aria-live="assertive"></div>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

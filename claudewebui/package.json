@@ -1,0 +1,17 @@
+{
+  "name": "claude-cli-studio",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A local, cross-platform web interface for Claude Code CLI sessions.",
+  "type": "module",
+  "scripts": {
+    "start": "node --no-warnings=ExperimentalWarning server.mjs",
+    "test": "node --no-warnings=ExperimentalWarning --test"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.220"
+  },
+  "engines": {
+    "node": ">=20.10"
+  }
+}
