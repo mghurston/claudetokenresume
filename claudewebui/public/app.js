@@ -1073,6 +1073,51 @@ document.addEventListener("visibilitychange", () => {
 });
 window.addEventListener("focus", clearAttention);
 
+/**
+ * Closing the window stops Studio, the way closing an application does.
+ *
+ * `pagehide` also fires on a reload and on following a link, so this never
+ * decides anything on its own — it tells the server the window is going, and
+ * the server waits a few seconds to see whether a tab comes back.
+ *
+ * `keepalive` is what makes the request survive the page it was sent from;
+ * without it the browser cancels in-flight requests on unload and the message
+ * never arrives. It also carries headers, which `sendBeacon` cannot, and this
+ * route is authenticated.
+ *
+ * When work is in flight Studio deliberately stays up, so say so out loud —
+ * otherwise it is a background process nobody knows is running.
+ */
+window.addEventListener("pagehide", () => {
+  const busy = state.runningSessions.size > 0 || state.queue.length > 0;
+  if (busy) {
+    if (window.Notification?.permission === "granted") {
+      try {
+        new Notification("Claude CLI Studio is still running", {
+          body:
+            state.runningSessions.size > 0
+              ? "Claude is still working. It will finish without this window."
+              : "Messages are still parked, waiting for your usage window to reset.",
+          tag: "studio-still-running",
+        });
+      } catch {
+        /* nothing more we can do from a page that is going away */
+      }
+    }
+    return;
+  }
+  try {
+    fetch("/api/window-closed", {
+      method: "POST",
+      keepalive: true,
+      headers: { Authorization: `Bearer ${studioToken}`, "Content-Type": "application/json" },
+      body: "{}",
+    }).catch(() => {});
+  } catch {
+    /* the page is unloading; there is nothing to report to */
+  }
+});
+
 const SOUND_KEY = "claude-cli-studio-sound";
 
 function alertsEnabled() {

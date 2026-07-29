@@ -38,12 +38,16 @@ Double-click **`Claude Studio.cmd`** (Windows) or **`Claude Studio.command`**
 (macOS) in the folder above this one. Either one installs dependencies on first
 run, starts the server, and opens your browser.
 
-**Studio keeps running after you close that window.** It is started as a
-background process on purpose, so a stray window close can't kill Claude
-mid-task. Two ways to stop it:
+**Closing the launcher window does not stop Studio** — it runs in the
+background on purpose, so a stray window close can't kill Claude mid-task.
 
-- the **Quit** button at the bottom of the sidebar, or
-- run the launcher again and choose **Stop it**.
+**Closing the Studio window does stop it**, like any application — with one
+exception: if Claude is still working, or messages are parked waiting for your
+usage window to reset, Studio keeps running and tells you so. Reloading the
+page is not closing.
+
+You can also stop it with the **Quit** button at the bottom of the sidebar, or
+by running the launcher again and choosing **Stop it**.
 
 Running the launcher while Studio is already up offers to open it, stop it, or
 replace it — it never just fails.

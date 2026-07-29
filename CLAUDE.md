@@ -192,11 +192,28 @@ inherited stdio, output to `~/.claude-cli-studio/studio.log`), waits for
 console, so the close event that used to kill Studio mid-conversation never
 reaches it. `npm run server` still runs the server in the foreground.
 
-Because closing the window no longer stops Studio, there are two deliberate ways
-to stop it, and they must both keep working: the **Quit** button in the sidebar
-and the **Stop it** choice the launcher offers when you start it while one is
-already running. Both go through `POST /api/shutdown` -> `quitStudio()` ->
-`shutdown()`.
+There are three ways to stop it, and all three must keep working: the **Quit**
+button in the sidebar, the **Stop it** choice the launcher offers when one is
+already running, and **closing the Studio window**. The first two go through
+`POST /api/shutdown` -> `quitStudio()` -> `shutdown()`.
+
+Closing the window goes through `POST /api/window-closed` ->
+`scheduleCloseWithLastWindow()`, and is hedged twice, because `pagehide` fires
+on a reload and on following a link exactly as it does on a close:
+
+- **An 8-second grace period.** Any new event-stream client cancels the
+  countdown, which is what makes a reload a reload. The fire path re-checks
+  `eventClients.size` too, so a second open window is never orphaned.
+- **`workInFlight()` wins outright.** A running turn, a parked turn or an
+  unanswered permission prompt means Studio was deliberately left to work
+  alone — tidying up a window must not kill it, which is the whole reason it
+  was made to survive its launcher. The page says so with a notification rather
+  than dying quietly. `CLAUDE_STUDIO_KEEP_ALIVE=1` disables closing entirely.
+
+The browser sends that with `fetch(..., { keepalive: true })`, not
+`sendBeacon`: the request has to outlive the page that sent it *and* carry an
+`Authorization` header, and `sendBeacon` cannot do the second.
+`scripts/e2e-close.mjs` covers all four cases in a real browser.
 
 `/api/shutdown` accepts the **launch token as well as** the session token, and is
 gated *before* the session-token wall. A second launcher has only the launch

@@ -760,6 +760,8 @@ function beginEventStream(request, response) {
       queue: turnQueue.list(),
     })}\n\n`,
   );
+  // A window came back — this was a reload, not a close.
+  cancelCloseWithLastWindow();
   eventClients.add(response);
   for (const pending of pendingPermissions.values()) {
     response.write(`data: ${JSON.stringify(pending.payload)}\n\n`);
@@ -1268,6 +1270,18 @@ const server = http.createServer(async (request, response) => {
       json(response, 200, { app: "claude-cli-studio" });
       return;
     }
+    // The window is going away. Studio behaves like an application — closing it
+    // stops it — but never at the cost of work in flight.
+    if (request.method === "POST" && url.pathname === "/api/window-closed") {
+      enforceSameOrigin(request, ALLOWED_ORIGINS);
+      if (!requestIsAuthenticated(request)) {
+        json(response, 401, { error: "Studio authentication is required." });
+        return;
+      }
+      json(response, 202, { stopping: scheduleCloseWithLastWindow() });
+      return;
+    }
+
     // Quitting is the one thing a launcher can ask for with only the launch
     // token, so it is gated before the session-token wall rather than behind it.
     if (request.method === "POST" && url.pathname === "/api/shutdown") {
@@ -1523,6 +1537,54 @@ async function shutdown() {
   server.closeAllConnections?.();
   await new Promise((resolve) => server.close(resolve));
   await claude.stop();
+}
+
+/**
+ * Closing the last window stops Studio — after a short grace period, and never
+ * while there is work to lose.
+ *
+ * The grace period is what separates "closed" from "reloaded": a reload, an F5,
+ * or following a link all fire the same page-is-going-away event, and all
+ * reconnect within a second or two. Any new event-stream client cancels the
+ * countdown.
+ *
+ * Work in flight always wins. A running turn or a parked turn means Studio was
+ * deliberately left to work alone, and tidying up a window must not kill it —
+ * that is the entire reason it was made to survive its launcher in the first
+ * place. `CLAUDE_STUDIO_KEEP_ALIVE=1` opts out of closing altogether.
+ */
+const CLOSE_GRACE_MS = 8000;
+let closeTimer = null;
+
+function workInFlight() {
+  const running = [...sessionStreams.values()].some((stream) => stream.running);
+  return running || turnQueue.size() > 0 || pendingPermissions.size > 0;
+}
+
+function cancelCloseWithLastWindow() {
+  if (closeTimer) {
+    clearTimeout(closeTimer);
+    closeTimer = null;
+  }
+}
+
+function scheduleCloseWithLastWindow() {
+  if (process.env.CLAUDE_STUDIO_KEEP_ALIVE === "1" || workInFlight()) {
+    return false;
+  }
+  cancelCloseWithLastWindow();
+  closeTimer = setTimeout(() => {
+    closeTimer = null;
+    // Re-check everything at the moment of truth: a tab may have reconnected,
+    // or the watch may have released a parked turn while we counted down.
+    if (eventClients.size > 0 || workInFlight()) {
+      return;
+    }
+    console.log("Last window closed. Stopping.");
+    quitStudio().catch(() => process.exit(1));
+  }, CLOSE_GRACE_MS);
+  closeTimer.unref?.();
+  return true;
 }
 
 /**
