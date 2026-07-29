@@ -351,6 +351,19 @@ file contents. The text field stays alongside Browse — the picker is an
 addition, not a replacement. A path that fails to resolve must fall back to the
 drive list, or the dialog is a dead end with nothing to click.
 
+`/api/ping` also reports `windows` — the number of connected event-stream
+clients. That is how a second launch tells "Studio is running with a window
+already on screen" from "Studio is running with nothing on screen". Without it
+every launch opened another window, and they stacked up until the taskbar held
+several Studios of which only the newest was connected to anything. The
+unattended path now leaves an already-open Studio alone; the interactive menu
+says how many windows are up and relabels the choice "Open another window".
+
+Exits in `start.mjs` go through `settleAndExit`, which pauses ~250ms first.
+Tearing down the event loop in the same tick as a `spawn` of a detached child
+trips a libuv assertion on Windows (`UV_HANDLE_CLOSING`, `src/win/async.c`) —
+the launcher printed its success message and then died with a native assertion.
+
 `probePortHolder` classifies the port
 holder three ways: `current` (answers `/api/ping`), `legacy` (an older Studio —
 `/api/ping` predates it, so the request falls to the auth gate and 401s with

@@ -1267,7 +1267,11 @@ const server = http.createServer(async (request, response) => {
     // port could not already infer: it exists so a second launcher can tell
     // "Studio already owns this port" from "something else does".
     if (request.method === "GET" && url.pathname === "/api/ping") {
-      json(response, 200, { app: "claude-cli-studio" });
+      // `windows` lets a second launcher tell "Studio is running with a window
+      // already open" from "Studio is running headless". Without it every
+      // launch opened another window, and they stack up until the taskbar is
+      // full of Studios where only the newest is connected to anything.
+      json(response, 200, { app: "claude-cli-studio", windows: eventClients.size });
       return;
     }
     // The window is going away. Studio behaves like an application — closing it

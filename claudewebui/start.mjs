@@ -25,6 +25,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   askChoice,
+  countOpenWindows,
   findFreePort,
   findPortOwner,
   probePortHolder,
@@ -48,6 +49,19 @@ const LOG_FILE = path.join(DATA_DIRECTORY, "studio.log");
 const PRESET = (process.env.CLAUDE_STUDIO_ON_CONFLICT || "").trim().toLowerCase();
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Exits, but not in the same tick as a `spawn`.
+ *
+ * Tearing the event loop down while a detached child handle is still being set
+ * up trips a libuv assertion on Windows — the launcher prints its success
+ * message and then dies with `UV_HANDLE_CLOSING` from src/win/async.c. A short
+ * pause is enough for the handle to finish.
+ */
+async function settleAndExit(code) {
+  await wait(250);
+  process.exit(code);
+}
 
 /**
  * Browsers that can host a page as a plain application window.
@@ -220,7 +234,7 @@ async function launch(port) {
   console.log("");
   console.log(`  Log: ${LOG_FILE}`);
   console.log("");
-  process.exit(0);
+  await settleAndExit(0);
 }
 
 /**
@@ -248,15 +262,27 @@ async function main() {
   if (holder === "current" || holder === "legacy") {
     const owner = await findPortOwner(PORT);
     const href = await runningStudioLaunchHref(RUNTIME_FILE, PORT, ORIGIN);
+    const openWindows = await countOpenWindows(ORIGIN);
     console.log(
       `\nClaude CLI Studio is already running on port ${PORT}` +
         (owner ? ` (${owner.name}, pid ${owner.pid}).` : ".") +
         (holder === "legacy" ? "\nIt is an older version than this one." : ""),
     );
+    if (openWindows > 0) {
+      console.log(
+        openWindows === 1
+          ? "Its window is already open — look for it in your taskbar."
+          : `It already has ${openWindows} windows open.`,
+      );
+    }
 
     const choices = [];
     if (href) {
-      choices.push({ key: "o", label: "Open it", default: holder === "current" });
+      choices.push({
+        key: "o",
+        label: openWindows > 0 ? "Open another window" : "Open it",
+        default: holder === "current" && openWindows === 0,
+      });
     }
     choices.push({
       key: "s",
@@ -276,7 +302,7 @@ async function main() {
     if (choice === "o" && href) {
       console.log("Opening it in your browser.");
       openBrowser(href);
-      process.exit(0);
+      await settleAndExit(0);
     }
     if (choice === "s" || choice === "r") {
       console.log("Stopping the running Studio…");
@@ -294,22 +320,28 @@ async function main() {
       }
       console.log("Stopped.");
       if (choice === "s") {
-        process.exit(0);
+        await settleAndExit(0);
       }
       await launch(PORT);
       return;
     }
     if (choice === "q") {
       console.log("Left it running.");
-      process.exit(0);
+      await settleAndExit(0);
     }
 
     // Nobody was there to answer. Opening what is already up is the harmless
-    // reading of "start Studio", and it is what the old launcher did.
+    // reading of "start Studio" — but only when nothing is on screen yet.
+    // Opening unconditionally is how a taskbar ends up with four Studios, of
+    // which only the newest is connected to anything.
+    if (openWindows > 0) {
+      console.log("Studio is already open. Leaving it alone.");
+      await settleAndExit(0);
+    }
     if (href) {
       openBrowser(href);
       console.log("Opened the Studio that was already running.");
-      process.exit(0);
+      await settleAndExit(0);
     }
     console.error(`Port ${PORT} is held by Studio, but it could not be opened.`);
     process.exit(1);

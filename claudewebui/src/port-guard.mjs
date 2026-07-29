@@ -28,6 +28,19 @@ const execFileAsync = promisify(execFile);
  * `foreign` — HTTP, but not us. Never killed automatically.
  * `free`    — nothing answered at all.
  */
+/** How many Studio windows are connected right now, or 0 if it cannot be asked. */
+export async function countOpenWindows(origin) {
+  try {
+    const response = await fetch(new URL("/api/ping", origin), {
+      signal: AbortSignal.timeout(2500),
+    });
+    const body = await response.json().catch(() => null);
+    return Number.isInteger(body?.windows) ? body.windows : 0;
+  } catch {
+    return 0;
+  }
+}
+
 export async function probePortHolder(origin) {
   let response;
   try {
