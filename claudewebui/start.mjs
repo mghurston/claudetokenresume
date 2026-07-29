@@ -214,8 +214,9 @@ async function launch(port) {
   console.log(`  Claude CLI Studio is running at ${origin}`);
   console.log(`  It keeps running after you close this window (pid ${pid}).`);
   console.log("");
-  console.log("  To stop it: press Quit in the sidebar, or run this launcher");
-  console.log("  again and choose \"Stop it\".");
+  console.log("  Closing the Studio window stops it — unless Claude is still");
+  console.log("  working, in which case it keeps going and tells you.");
+  console.log("  You can also press Quit in the sidebar.");
   console.log("");
   console.log(`  Log: ${LOG_FILE}`);
   console.log("");
