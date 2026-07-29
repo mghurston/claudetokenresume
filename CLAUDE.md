@@ -345,8 +345,36 @@ The `SawCap` rule is carried over verbatim and is just as load-bearing here: a
 queued turn is released only after an observed capped -> lifted transition.
 Arming while uncapped must keep waiting, never fire. `src/turn-queue.mjs` keeps
 one turn per session and `drain()`s in one step so a second lift signal cannot
-double-send. Queued turns are in memory only — deliberately, so draft prompts
-never land on disk in a second place with a different lifetime.
+double-send.
+
+Queued turns **are** persisted, to `~/.claude-cli-studio/queue.json` (0600,
+deleted the moment the queue empties). They used to be memory-only, to keep
+prompt text out of any file but the real transcript — that stopped being the
+right trade once Studio grew a Quit button and a Restart button. A turn can wait
+hours for a 5-hour window, and losing it to a click or an overnight reboot is
+worse than the file. `TurnQueue` takes an injected `persist` so it stays
+synchronous and a failed write can never break the send path; `restoreTurnQueue`
+reloads at startup and re-arms the watch. Covered by `scripts/e2e-queue.mjs`,
+which SIGKILLs the server to prove it.
+
+### Being told about things
+
+Studio can be left alone, so it has to be able to reach you. `alertAway()` in
+`app.js` fires on a finished turn, a failed turn, a waiting permission prompt,
+and a released queue — through three channels, because any one can be off: a
+system notification, a synthesized two-note chime (no audio file to ship), and a
+count in the window title. **It only fires while the page is hidden or
+unfocused** — alerting about something you are watching happen is noise, and
+noise is why people switch notifications off, after which the one that mattered
+never arrives either. The bell in the sidebar footer silences it; notification
+permission is requested on first send, not on page load, where the browser
+prompt lands before Studio has done anything worth announcing.
+
+A pending permission prompt's ten-minute deny timer **only counts down while a
+browser is connected**. With the tab closed there is nobody to ask, so denying
+was guaranteed, and Claude usually stops — the run died of a question that was
+never delivered. A reconnecting tab is re-sent every pending prompt, so waiting
+is the honest answer.
 
 ## Conventions / gotchas
 

@@ -1,7 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { existsSync, realpathSync, statSync } from "node:fs";
-import { chmod, mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -267,7 +267,7 @@ function waitForPermission({ sessionId, request, signal }) {
   const requestId = crypto.randomUUID();
   return new Promise((resolve) => {
     const settle = (result) => {
-      clearTimeout(timeout);
+      clearInterval(timeout);
       pendingPermissions.delete(requestId);
       signal?.removeEventListener?.("abort", onAbort);
       resolve(result);
@@ -275,14 +275,28 @@ function waitForPermission({ sessionId, request, signal }) {
     const onAbort = () =>
       settle({ behavior: "deny", message: "The request was cancelled." });
 
-    const timeout = setTimeout(
-      () =>
+    // The clock only runs while a browser is actually connected.
+    //
+    // A flat ten-minute deny was a trap: with the tab closed there is nobody to
+    // ask, so denying is guaranteed and Claude usually stops — the run dies of a
+    // question that was never delivered. Waiting is the honest answer, because a
+    // reconnecting tab is re-sent every pending prompt. If someone *is* watching
+    // and still says nothing for ten minutes, denying is fair.
+    let unansweredMs = 0;
+    const tick = 15 * 1000;
+    const timeout = setInterval(() => {
+      if (eventClients.size === 0) {
+        unansweredMs = 0;
+        return;
+      }
+      unansweredMs += tick;
+      if (unansweredMs >= 10 * 60 * 1000) {
         settle({
           behavior: "deny",
           message: "Nobody answered the permission prompt in Claude CLI Studio.",
-        }),
-      10 * 60 * 1000,
-    );
+        });
+      }
+    }, tick);
     timeout.unref();
     signal?.addEventListener?.("abort", onAbort, { once: true });
 
@@ -352,7 +366,48 @@ const claude = new ClaudeBridge({
   onRateLimit: (info) => limitWatch.observe(info),
 });
 
-const turnQueue = new TurnQueue();
+/**
+ * The parked-turn file: its own file, 0600, removed as soon as the queue is
+ * empty. Written after every change so a Quit, a Restart, or a reboot cannot
+ * eat a turn that has been waiting hours for a usage window.
+ */
+const QUEUE_FILE = path.join(DATA_DIRECTORY, "queue.json");
+
+const turnQueue = new TurnQueue({
+  persist: (entries) => {
+    if (!entries) {
+      rm(QUEUE_FILE, { force: true }).catch(() => {});
+      return;
+    }
+    writeFile(QUEUE_FILE, `${JSON.stringify(entries, null, 2)}\n`, { mode: 0o600 }).catch(
+      (error) => console.error(`Could not save the parked turns: ${error.message}`),
+    );
+  },
+});
+
+/** Reloads turns parked by a previous run. */
+async function restoreTurnQueue() {
+  let raw;
+  try {
+    raw = await readFile(QUEUE_FILE, "utf8");
+  } catch {
+    return 0;
+  }
+  let entries;
+  try {
+    entries = JSON.parse(raw);
+  } catch {
+    await rm(QUEUE_FILE, { force: true }).catch(() => {});
+    return 0;
+  }
+  const restored = turnQueue.restore(entries);
+  if (restored) {
+    // Whatever the cap was doing when we went down, we no longer know — start
+    // watching again so these can be released on the next real lift.
+    limitWatch.setPendingCount(turnQueue.size());
+  }
+  return restored;
+}
 const limitWatch = new LimitWatch({
   onChange: () => broadcast(watchPayload()),
   onRelease: () => {
@@ -665,6 +720,10 @@ async function bootstrapPayload() {
     models: modelCatalog(),
     efforts: effortLevels(),
     permissionModes: permissionModes(),
+    // Studio runs detached with no console, so this file is the only place a
+    // failure is written down. The UI shows the path rather than making people
+    // guess it.
+    logFile: path.join(DATA_DIRECTORY, "studio.log"),
     projects,
     limit: limitWatch.snapshot(),
     queue: turnQueue.list(),
@@ -1414,6 +1473,14 @@ server.listen(PORT, HOST, async () => {
   // the user's own window, so polling it to keep a bar fresh would be
   // self-defeating. The Refresh button in the Usage dialog asks for more.
   limitWatch.check().catch(() => {});
+
+  const restored = await restoreTurnQueue().catch(() => 0);
+  if (restored) {
+    console.log(
+      `${restored} parked turn${restored === 1 ? "" : "s"} restored — waiting for the usage window.`,
+    );
+    broadcast(watchPayload());
+  }
   console.log(`Claude CLI Studio is running at ${EXPECTED_ORIGIN}`);
   console.log(`Workspace root: ${WORKSPACE_ROOT}`);
   const cli = await cliInfo();

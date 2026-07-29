@@ -239,6 +239,34 @@ try {
     await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1),
   );
 
+  // --- alerts --------------------------------------------------------------
+  const alerts = page.locator("#alertsButton");
+  check("there is an alerts toggle", await alerts.isVisible());
+  check(
+    "alerts are on by default",
+    (await alerts.getAttribute("aria-pressed")) === "true",
+  );
+  await alerts.click();
+  check(
+    "clicking silences them",
+    (await alerts.getAttribute("aria-pressed")) === "false",
+  );
+  check(
+    "silence is remembered",
+    (await page.evaluate(() => localStorage.getItem("claude-cli-studio-sound"))) === "off",
+  );
+  await alerts.click();
+  check("clicking again turns them back on", (await alerts.getAttribute("aria-pressed")) === "true");
+
+  // The title badge is the channel that works even with notifications denied
+  // and the sound off, so it must survive a hidden page.
+  const badged = await page.evaluate(() => {
+    document.dispatchEvent(new Event("visibilitychange"));
+    window.dispatchEvent(new Event("blur"));
+    return document.title;
+  });
+  check("the window title starts clean", badged === "Claude CLI Studio", badged);
+
   // --- quit ----------------------------------------------------------------
   await page.click("#quitButton");
   await page.waitForSelector("#quitDialog[open]", { timeout: 10000 });

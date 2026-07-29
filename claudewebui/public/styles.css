@@ -257,6 +257,20 @@ svg {
   height: 18px;
 }
 
+/* One bell, two glyphs — whichever matches the current state is shown. */
+#alertsButton .bell-off,
+#alertsButton[aria-pressed="false"] .bell-on {
+  display: none;
+}
+
+#alertsButton[aria-pressed="false"] .bell-off {
+  display: block;
+}
+
+#alertsButton[aria-pressed="false"] {
+  color: var(--text-faint);
+}
+
 /**
  * Quit carries a word, not just a glyph.
  *

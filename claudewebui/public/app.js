@@ -76,9 +76,11 @@ const elements = {
   usageNote: document.querySelector("#usageNote"),
   usageRefresh: document.querySelector("#usageRefresh"),
   usageWindows: document.querySelector("#usageWindows"),
+  alertsButton: document.querySelector("#alertsButton"),
   sidebarResizer: document.querySelector("#sidebarResizer"),
   quitButton: document.querySelector("#quitButton"),
   quitConfirm: document.querySelector("#quitConfirm"),
+  quitLogPath: document.querySelector("#quitLogPath"),
   quitDialog: document.querySelector("#quitDialog"),
   quitForm: document.querySelector("#quitForm"),
   quitOverlay: document.querySelector("#quitOverlay"),
@@ -502,6 +504,9 @@ elements.quitButton?.addEventListener("click", () => {
     warnings.push(
       `${queued} queued ${queued === 1 ? "message" : "messages"} will be discarded`,
     );
+  }
+  if (elements.quitLogPath && state.bootstrap?.logFile) {
+    elements.quitLogPath.textContent = state.bootstrap.logFile;
   }
   elements.quitWarning.textContent = warnings.length ? `${warnings.join(", and ")}.` : "";
   elements.quitWarning.classList.toggle("hidden", warnings.length === 0);
@@ -972,6 +977,143 @@ async function cancelQueuedTurn(sessionId) {
  * Best-effort desktop notification when parked work wakes up. The tab is often
  * in the background for hours by then, which is the whole point.
  */
+/**
+ * Getting the user's attention when they are not looking at Studio.
+ *
+ * Everything below only fires while the page is hidden or unfocused. A
+ * notification for something you are already watching happen is noise, and
+ * noise is how people turn notifications off — after which the one that
+ * mattered never arrives either.
+ *
+ * Three channels, because any one of them can be off: a system notification, a
+ * short tone, and the tab/window title. The title is the one that always works.
+ */
+const BASE_TITLE = "Claude CLI Studio";
+let attentionCount = 0;
+
+function isWatching() {
+  return document.visibilityState === "visible" && document.hasFocus();
+}
+
+function updateTitleBadge() {
+  document.title = attentionCount ? `(${attentionCount}) ${BASE_TITLE}` : BASE_TITLE;
+}
+
+function clearAttention() {
+  if (attentionCount) {
+    attentionCount = 0;
+    updateTitleBadge();
+  }
+}
+
+/** A short two-note chime, synthesized so there is no audio file to ship. */
+function playChime() {
+  if (localStorage.getItem("claude-cli-studio-sound") === "off") {
+    return;
+  }
+  try {
+    const context = new (window.AudioContext || window.webkitAudioContext)();
+    const now = context.currentTime;
+    for (const [index, frequency] of [880, 1174.7].entries()) {
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      oscillator.type = "sine";
+      oscillator.frequency.value = frequency;
+      const start = now + index * 0.13;
+      // Ramp rather than switch, or the tone clicks at both ends.
+      gain.gain.setValueAtTime(0.0001, start);
+      gain.gain.exponentialRampToValueAtTime(0.13, start + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.12);
+      oscillator.connect(gain).connect(context.destination);
+      oscillator.start(start);
+      oscillator.stop(start + 0.14);
+    }
+    setTimeout(() => context.close().catch(() => {}), 800);
+  } catch {
+    /* no audio device, or autoplay is blocked until the user interacts */
+  }
+}
+
+function alertAway(title, body, { attention = false, force = false } = {}) {
+  if (isWatching() && !force) {
+    return;
+  }
+  if (attention) {
+    attentionCount += 1;
+    updateTitleBadge();
+  }
+  playChime();
+  if (window.Notification?.permission === "granted") {
+    try {
+      const notification = new Notification(title, { body: body || "", tag: title });
+      notification.onclick = () => {
+        window.focus();
+        notification.close();
+      };
+    } catch {
+      /* some platforms refuse constructed notifications */
+    }
+  }
+}
+
+function sessionTitleFor(sessionId) {
+  for (const project of state.bootstrap?.projects || []) {
+    const session = project.sessions.find((item) => item.id === sessionId);
+    if (session) {
+      return session.title || "Untitled conversation";
+    }
+  }
+  return sessionId === state.activeSessionId
+    ? state.activeSessionTitle || "Your conversation"
+    : "A conversation";
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (isWatching()) clearAttention();
+});
+window.addEventListener("focus", clearAttention);
+
+const SOUND_KEY = "claude-cli-studio-sound";
+
+function alertsEnabled() {
+  return localStorage.getItem(SOUND_KEY) !== "off";
+}
+
+function renderAlertsButton() {
+  const on = alertsEnabled();
+  elements.alertsButton?.setAttribute("aria-pressed", String(on));
+  elements.alertsButton?.setAttribute(
+    "title",
+    on ? "Alerts on — click to silence" : "Alerts silenced — click to turn on",
+  );
+}
+
+/**
+ * Asked for once, the first time the user does something whose ending they
+ * would want to hear about — not on page load, where "Studio wants to send
+ * notifications" arrives before Studio has done anything worth announcing and
+ * gets denied out of reflex.
+ */
+function requestAlertPermission() {
+  if (alertsEnabled() && window.Notification?.permission === "default") {
+    Notification.requestPermission().catch(() => {});
+  }
+}
+
+elements.alertsButton?.addEventListener("click", () => {
+  const next = !alertsEnabled();
+  localStorage.setItem(SOUND_KEY, next ? "on" : "off");
+  renderAlertsButton();
+  if (next) {
+    requestAlertPermission();
+    // Play it so "on" is something you hear, not just something you read.
+    playChime();
+    showToast("Alerts on — you'll be told when Claude finishes or needs you.");
+  } else {
+    showToast("Alerts silenced.");
+  }
+});
+
 function notifyReleased(released) {
   const count = released.length;
   const body =
@@ -981,9 +1123,7 @@ function notifyReleased(released) {
   showToast(
     count === 1 ? "Usage window reset — your queued message was sent." : `Usage window reset — ${count} queued messages sent.`,
   );
-  if (window.Notification?.permission === "granted") {
-    new Notification("Claude picked up your queued work", { body });
-  }
+  alertAway("Claude picked up your queued work", body, { attention: true });
 }
 
 function renderSidebar() {
@@ -1888,6 +2028,8 @@ async function sendMessage() {
     return;
   }
   const outgoingPrompt = btwNote !== null ? btwNote : prompt;
+  // Sending is the moment "tell me when this is done" starts to mean something.
+  requestAlertPermission();
   // A suggestion belongs to the turn that produced it; once you send, it is stale.
   setSuggestion(null);
 
@@ -2148,6 +2290,13 @@ function enqueuePermission(payload) {
     return;
   }
   state.permissionQueue.push(payload);
+  // A prompt nobody sees is the failure this app keeps rediscovering: the turn
+  // sits there waiting on a click that is not coming.
+  alertAway(
+    "Claude needs your permission",
+    payload.request.title || `It wants to use ${payload.request.displayName || payload.request.toolName}.`,
+    { attention: true },
+  );
   showNextPermission();
 }
 
@@ -2228,6 +2377,15 @@ function handleClaudeEvent(payload) {
     if (sessionId === state.activeSessionId) {
       updateSendControls();
     }
+    // The point of this app is that you can start something and go do
+    // something else, so finishing has to be able to reach you.
+    alertAway(
+      event.type === "session.error" ? "A Claude session failed" : "Claude is done",
+      event.type === "session.error"
+        ? event.data.message || "The session stopped with an error."
+        : sessionTitleFor(sessionId),
+      { attention: true },
+    );
     setTimeout(() => refreshBootstrap({ quiet: true }), 250);
   }
 
@@ -2565,11 +2723,7 @@ elements.watchButton.addEventListener("click", () => {
   state.queueForReset = !state.queueForReset;
   updateWatchButton();
   if (state.queueForReset) {
-    // Ask the first time it is armed, not on page load — the permission prompt
-    // makes sense once you have said you want to be told about something.
-    if (window.Notification?.permission === "default") {
-      Notification.requestPermission().catch(() => {});
-    }
+    requestAlertPermission();
     showToast("This message will wait for the usage window to reset.");
   }
 });
@@ -2853,6 +3007,8 @@ setInterval(() => {
 
 initializeTheme();
 initializeSidebarWidth();
+renderAlertsButton();
+updateTitleBadge();
 connectEventStream();
 await refreshBootstrap();
 startNewChat(state.bootstrap?.projects[0]?.id || "general");

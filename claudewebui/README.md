@@ -67,6 +67,21 @@ detaches, so the terminal is free. Its output goes to
 `~/.claude-cli-studio/studio.log`. Use `npm run server` instead if you want it
 in the foreground with `Ctrl+C` to stop it.
 
+## Being told when something happens
+
+Studio is meant to be left alone, so it tells you when Claude **finishes**, when
+Claude **needs a permission**, and when a queued message wakes up — with a system
+notification, a short chime, and a count in the window title.
+
+It stays quiet while you are actually looking at it. The bell at the bottom of
+the sidebar silences it.
+
+A permission prompt no longer expires while nothing is connected. Close the
+window mid-task and the prompt is still waiting when you come back.
+
+Queued messages survive Quit, Restart and a reboot — they are saved to
+`~/.claude-cli-studio/queue.json` and picked up on the next start.
+
 ## Usage
 
 The meter at the bottom of the sidebar shows how much of your 5-hour window is

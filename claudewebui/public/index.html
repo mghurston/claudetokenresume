@@ -100,6 +100,18 @@
               <path d="M20 4v4.5h-4.5"/>
             </svg>
           </button>
+          <button class="icon-button" id="alertsButton" aria-pressed="true" aria-label="Alerts">
+            <svg class="bell-on" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M18 8a6 6 0 1 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/>
+              <path d="M10.3 21a2 2 0 0 0 3.4 0"/>
+            </svg>
+            <svg class="bell-off" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M18 8a6 6 0 0 0-9.3-5"/>
+              <path d="M6 8c0 7-3 7-3 9h13"/>
+              <path d="M10.3 21a2 2 0 0 0 3.4 0"/>
+              <path d="M3 3l18 18"/>
+            </svg>
+          </button>
           <button class="quit-button" id="quitButton" title="Stop Studio's server">
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="M12 3v9"/>
@@ -359,6 +371,9 @@
           </div>
         </header>
         <p class="restart-warning hidden" id="quitWarning"></p>
+        <p class="usage-note">
+          Studio&rsquo;s log: <code id="quitLogPath">~/.claude-cli-studio/studio.log</code>
+        </p>
         <footer>
           <button class="button secondary" type="button" data-close-dialog>Cancel</button>
           <button class="button primary" type="submit" id="quitConfirm">Quit</button>

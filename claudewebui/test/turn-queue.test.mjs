@@ -65,3 +65,53 @@ test("stored upload ids are copied so a caller cannot mutate the queue", () => {
 
   assert.deepEqual(queue.get("session-a").uploadIds, ["upload-1"]);
 });
+
+test("parked turns are written out so Quit and Restart cannot eat them", () => {
+  // A turn can wait hours for a 5-hour window. Losing it to a button click, or
+  // to a machine that reboots overnight, is worse than the file it costs.
+  const written = [];
+  const queue = new TurnQueue({ persist: (entries) => written.push(entries) });
+
+  queue.add({ sessionId: "s1", projectId: "p", prompt: "hi", uploadIds: [] });
+  assert.equal(written.length, 1);
+  assert.equal(written.at(-1).length, 1);
+  assert.equal(written.at(-1)[0].prompt, "hi");
+
+  queue.add({ sessionId: "s2", projectId: "p", prompt: "there", uploadIds: [] });
+  assert.equal(written.at(-1).length, 2);
+
+  queue.cancel("s1");
+  assert.equal(written.at(-1).length, 1);
+
+  // Null means "the queue is empty" — the file is removed, not left holding a
+  // prompt nobody is waiting on any more.
+  queue.drain();
+  assert.equal(written.at(-1), null);
+});
+
+test("a failing write never breaks the queue", () => {
+  const queue = new TurnQueue({
+    persist: () => {
+      throw new Error("disk full");
+    },
+  });
+  assert.doesNotThrow(() =>
+    queue.add({ sessionId: "s1", projectId: "p", prompt: "hi", uploadIds: [] }),
+  );
+  assert.equal(queue.size(), 1);
+});
+
+test("restoring picks up where the last run left off", () => {
+  const queue = new TurnQueue();
+  const restored = queue.restore([
+    { sessionId: "s1", projectId: "p", prompt: "waiting", uploadIds: ["u1"] },
+    { sessionId: "s2", projectId: "p", prompt: "also waiting", uploadIds: [] },
+    null,
+    { prompt: "no session id" },
+  ]);
+
+  assert.equal(restored, 2);
+  assert.equal(queue.get("s1").prompt, "waiting");
+  assert.deepEqual(queue.get("s1").uploadIds, ["u1"]);
+  assert.equal(queue.restore("not an array"), 0);
+});
