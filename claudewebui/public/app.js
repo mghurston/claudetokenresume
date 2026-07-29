@@ -568,6 +568,9 @@ function sessionById(sessionId) {
 }
 
 function updateTopbar() {
+  // Every path that changes which conversation is open ends up here, so this is
+  // the one place that has to remember it for the next launch.
+  rememberOpenSession();
   const project = activeProject();
   elements.activeProjectPill.textContent = project?.name || "General";
   elements.activeProjectPill.title = project?.path || "";
@@ -1352,6 +1355,8 @@ function startNewChat(projectId = state.activeProjectId) {
   clearAttachments();
   setSuggestion(null);
   state.activeSessionId = null;
+  // Choosing a new chat is the one place that should forget where you were.
+  forgetOpenSession();
   state.activeProjectId = projectId || "general";
   state.activeSessionTitle = "New chat";
   resetRenderedEvents();
@@ -3070,10 +3075,104 @@ setInterval(() => {
   }
 }, 60 * 1000);
 
+/**
+ * Come back to the conversation you were in.
+ *
+ * Studio used to open on a blank New chat every single time. That was merely
+ * annoying while it ran forever in the background; once closing the window
+ * started quitting it, *every* launch landed on an empty page with the
+ * conversation you were mid-way through buried in the sidebar.
+ *
+ * The id is checked against the sidebar before it is used — a session can be
+ * deleted, or renamed away, between visits — and anything unrecognised falls
+ * straight through to a new chat.
+ */
+const LAST_SESSION_KEY = "claude-cli-studio-last-session";
+
+/**
+ * Read once, at load, before anything can overwrite it.
+ *
+ * Boot paints the topbar for an empty chat on its way to being ready, and
+ * `rememberOpenSession` runs from there — so by the time the restore ran, the
+ * record it wanted had already been cleared by the very boot that was about to
+ * read it.
+ */
+const rememberedSession = (() => {
+  try {
+    return JSON.parse(localStorage.getItem(LAST_SESSION_KEY) || "null");
+  } catch {
+    return null;
+  }
+})();
+
+/**
+ * Write-only, deliberately.
+ *
+ * This is reached from `updateTopbar`, which also runs during boot, before any
+ * session is open — so clearing here erased the record on the way to reading
+ * it, and the restore never had anything to find. Forgetting is an explicit act
+ * that belongs to `startNewChat`, where the user actually asked for a blank
+ * page.
+ */
+function rememberOpenSession() {
+  if (state.activeSessionId) {
+    localStorage.setItem(
+      LAST_SESSION_KEY,
+      JSON.stringify({ sessionId: state.activeSessionId, projectId: state.activeProjectId }),
+    );
+  }
+}
+
+function forgetOpenSession() {
+  localStorage.removeItem(LAST_SESSION_KEY);
+}
+
+/**
+ * Ask the server, rather than trusting the sidebar.
+ *
+ * A conversation started in this app is not in the sidebar catalog for a moment
+ * after it begins, so a "is it in the project list?" check rejects exactly the
+ * session you were most likely just using. The server knows.
+ */
+async function restoreLastSession() {
+  if (!rememberedSession?.sessionId) {
+    return false;
+  }
+
+  // A session that has only just answered is not readable for a moment — the
+  // transcript is still being written. Reloading in that window used to drop
+  // the conversation *and* forget it, so only a definite 404 counts as gone.
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      await api(`/api/sessions/${rememberedSession.sessionId}`);
+      await selectSession(
+        rememberedSession.sessionId,
+        rememberedSession.projectId || "general",
+      );
+      return true;
+    } catch (error) {
+      if (error.status === 404) {
+        // Deleted between visits. Not worth a message.
+        localStorage.removeItem(LAST_SESSION_KEY);
+        return false;
+      }
+      if (error.status === 401) {
+        return false;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  }
+  // Still not readable. Keep the record — the next launch may well find it.
+  return false;
+}
+
 initializeTheme();
 initializeSidebarWidth();
 renderAlertsButton();
 updateTitleBadge();
 connectEventStream();
 await refreshBootstrap();
-startNewChat(state.bootstrap?.projects[0]?.id || "general");
+
+if (!(await restoreLastSession())) {
+  startNewChat(state.bootstrap?.projects[0]?.id || "general");
+}

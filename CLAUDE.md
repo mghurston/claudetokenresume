@@ -396,6 +396,34 @@ synchronous and a failed write can never break the send path; `restoreTurnQueue`
 reloads at startup and re-arms the watch. Covered by `scripts/e2e-queue.mjs`,
 which SIGKILLs the server to prove it.
 
+### Coming back to where you were
+
+Studio reopens the conversation you had open, remembered in `localStorage` under
+`claude-cli-studio-last-session`. It used to boot to a blank New chat every
+time; that was merely annoying while it ran forever in the background, but once
+closing the window started quitting it, *every* launch landed on an empty page
+with your conversation buried in the sidebar.
+
+Two things about it are load-bearing and were both wrong first time:
+
+- `rememberOpenSession()` is **write-only**. It is reached from `updateTopbar`,
+  which also runs during boot before any session is open — so clearing there
+  erased the record on the way to reading it. Forgetting is an explicit act
+  belonging to `startNewChat`, where a blank page was actually asked for. The
+  record is also snapshotted into `rememberedSession` at module load, before
+  anything can touch it.
+- The restore **asks the server**, not the sidebar. A conversation started in
+  this app is not in the project catalog for a moment after it begins, so
+  checking the sidebar rejects exactly the session you were most likely just
+  using. Only a definite 404 forgets it; anything else retries, because a
+  session that has only just answered is briefly unreadable while Claude Code
+  writes its jsonl.
+
+`scripts/e2e-conversation.mjs` covers the core loop end to end — send, stream,
+reload, follow-up, sidebar, search — and deliberately waits for the transcript
+to be readable before reloading, since racing the CLI's own disk flush would be
+testing Claude Code rather than Studio.
+
 ### Being told about things
 
 Studio can be left alone, so it has to be able to reach you. `alertAway()` in

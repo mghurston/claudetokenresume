@@ -74,6 +74,9 @@ detaches, so the terminal is free. Its output goes to
 `~/.claude-cli-studio/studio.log`. Use `npm run server` instead if you want it
 in the foreground with `Ctrl+C` to stop it.
 
+Studio reopens whatever conversation you had open, so closing it and coming
+back puts you where you were rather than on a blank page.
+
 ## Being told when something happens
 
 Studio is meant to be left alone, so it tells you when Claude **finishes**, when
