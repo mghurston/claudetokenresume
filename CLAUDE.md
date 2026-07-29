@@ -204,11 +204,20 @@ on a reload and on following a link exactly as it does on a close:
 - **An 8-second grace period.** Any new event-stream client cancels the
   countdown, which is what makes a reload a reload. The fire path re-checks
   `eventClients.size` too, so a second open window is never orphaned.
-- **`workInFlight()` wins outright.** A running turn, a parked turn or an
-  unanswered permission prompt means Studio was deliberately left to work
-  alone — tidying up a window must not kill it, which is the whole reason it
-  was made to survive its launcher. The page says so with a notification rather
-  than dying quietly. `CLAUDE_STUDIO_KEEP_ALIVE=1` disables closing entirely.
+- **`workInFlight()` — parked turns only.** They are the whole point of the
+  watch: it fires them hours later when the window resets, which cannot happen
+  if closing a window takes the server down. The page says so with a
+  notification rather than dying quietly. `CLAUDE_STUDIO_KEEP_ALIVE=1` disables
+  closing entirely.
+
+A turn **in flight** deliberately does not veto the close. `beforeunload` makes
+the browser ask first whenever `runningSessions` is non-empty, so a close that
+reaches the server is an answered question, and overriding it would make that
+dialog a lie. Note that **the wording of that dialog cannot be set** — Chrome
+and Edge show their own generic text and ignore `returnValue`'s contents, since
+custom copy was abused; all `event.preventDefault()` + `returnValue` control is
+*whether* the question is asked. It is deliberately not raised for parked turns
+alone: prompting on every reload would train the reflex to dismiss it unread.
 
 The browser sends that with `fetch(..., { keepalive: true })`, not
 `sendBeacon`: the request has to outlive the page that sent it *and* carry an

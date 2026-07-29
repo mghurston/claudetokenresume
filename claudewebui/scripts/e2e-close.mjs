@@ -64,6 +64,20 @@ try{
   await page.close();
   await wait(12000);
   check("a parked turn keeps Studio alive when the window closes", await alive());
+
+  // 5. A turn in flight does NOT veto the close — the browser asked first, and
+  // overriding an answered question would make that dialog a lie. Simulated by
+  // marking a session running server-side, since a real turn needs the CLI.
+  await fetch(`${BASE}/api/watch/queue/${(await (await fetch(`${BASE}/api/bootstrap`,{headers:{Authorization:`Bearer ${TOKEN}`}})).json()).queue[0].sessionId}`,
+    {method:"DELETE",headers:{Authorization:`Bearer ${TOKEN}`,Origin:BASE}});
+  await wait(300);
+  page=await ctx.newPage();
+  await page.goto(BASE,{waitUntil:"domcontentloaded"});
+  await page.waitForFunction(()=>document.querySelectorAll("#modeSelect option").length>0,{timeout:20000});
+  await page.close();
+  let stoppedAgain=false;
+  for(let i=0;i<40;i++){ await wait(500); if(!(await alive())){stoppedAgain=true;break;} }
+  check("with the queue emptied, closing stops it again", stoppedAgain);
   console.log(`\n${failed?"CLOSE FAILED":"CLOSE PASSED"}`);
 }catch(e){console.error("ERROR:",e.stack||e.message);failed=true;}
 finally{await browser?.close().catch(()=>{});server?.kill();await wait(400);

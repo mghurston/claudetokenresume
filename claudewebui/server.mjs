@@ -1556,9 +1556,19 @@ async function shutdown() {
 const CLOSE_GRACE_MS = 8000;
 let closeTimer = null;
 
+/**
+ * What outranks a window close.
+ *
+ * Only parked turns. They are the whole point of the watch — it fires them
+ * hours later when the usage window resets, which cannot happen if closing a
+ * window takes the server down with it.
+ *
+ * A turn in flight deliberately does NOT count. The browser asks before closing
+ * while Claude is working, so a close that gets this far is an answered
+ * question, and second-guessing it would make the dialog a lie.
+ */
 function workInFlight() {
-  const running = [...sessionStreams.values()].some((stream) => stream.running);
-  return running || turnQueue.size() > 0 || pendingPermissions.size > 0;
+  return turnQueue.size() > 0;
 }
 
 function cancelCloseWithLastWindow() {

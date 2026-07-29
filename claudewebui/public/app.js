@@ -1088,16 +1088,36 @@ window.addEventListener("focus", clearAttention);
  * When work is in flight Studio deliberately stays up, so say so out loud —
  * otherwise it is a background process nobody knows is running.
  */
+/**
+ * Ask before closing while Claude is mid-turn.
+ *
+ * The browser owns the wording — Chrome and Edge show their own generic "Leave
+ * site?" text and ignore anything we put in the message, because scam sites
+ * abused custom copy. All we control is whether the question is asked at all.
+ * Setting `returnValue` is what asks it.
+ *
+ * Only for a turn actually in flight. Prompting every time someone reloads with
+ * something parked would train the reflex to dismiss it without reading, and
+ * then the one that mattered gets dismissed too.
+ */
+window.addEventListener("beforeunload", (event) => {
+  if (state.runningSessions.size === 0) {
+    return;
+  }
+  event.preventDefault();
+  event.returnValue = "";
+});
+
 window.addEventListener("pagehide", () => {
-  const busy = state.runningSessions.size > 0 || state.queue.length > 0;
-  if (busy) {
+  // Parked turns are the exception, and the only one. The watch exists to fire
+  // them hours later when the usage window resets, which cannot happen if
+  // closing a window takes the server down — so Studio stays up and says so.
+  // A turn in flight does NOT get this treatment: you were just asked.
+  if (state.runningSessions.size === 0 && state.queue.length > 0) {
     if (window.Notification?.permission === "granted") {
       try {
         new Notification("Claude CLI Studio is still running", {
-          body:
-            state.runningSessions.size > 0
-              ? "Claude is still working. It will finish without this window."
-              : "Messages are still parked, waiting for your usage window to reset.",
+          body: "Messages are parked, waiting for your usage window to reset.",
           tag: "studio-still-running",
         });
       } catch {

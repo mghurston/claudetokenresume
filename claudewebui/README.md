@@ -41,10 +41,13 @@ run, starts the server, and opens your browser.
 **Closing the launcher window does not stop Studio** — it runs in the
 background on purpose, so a stray window close can't kill Claude mid-task.
 
-**Closing the Studio window does stop it**, like any application — with one
-exception: if Claude is still working, or messages are parked waiting for your
-usage window to reset, Studio keeps running and tells you so. Reloading the
-page is not closing.
+**Closing the Studio window stops it**, like any application. If Claude is
+mid-turn your browser asks you to confirm first — that dialog's wording comes
+from the browser, not from Studio, and cannot be changed.
+
+The one exception is messages **parked waiting for a usage reset**: those exist
+to fire hours later, so Studio keeps running for them and tells you so.
+Reloading the page is not closing.
 
 You can also stop it with the **Quit** button at the bottom of the sidebar, or
 by running the launcher again and choosing **Stop it**.
