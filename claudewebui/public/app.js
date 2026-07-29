@@ -76,6 +76,7 @@ const elements = {
   usageNote: document.querySelector("#usageNote"),
   usageRefresh: document.querySelector("#usageRefresh"),
   usageWindows: document.querySelector("#usageWindows"),
+  sidebarResizer: document.querySelector("#sidebarResizer"),
   quitButton: document.querySelector("#quitButton"),
   quitConfirm: document.querySelector("#quitConfirm"),
   quitDialog: document.querySelector("#quitDialog"),
@@ -2436,6 +2437,122 @@ function initializeTheme() {
   setTheme(stored || preferred);
 }
 
+/**
+ * A draggable sidebar edge.
+ *
+ * Only `--sidebar-width` moves; the shell stays a two-column grid, so nothing
+ * else in the layout has to know this happened. The width is clamped rather
+ * than free: past the lower bound session titles are unreadable, and past the
+ * upper one the conversation — the reason the window is open — gets squeezed.
+ */
+const SIDEBAR_WIDTH_KEY = "claude-cli-studio-sidebar-width";
+const SIDEBAR_MIN = 210;
+const SIDEBAR_DEFAULT = 310;
+
+function sidebarMax() {
+  // Never let the sidebar take more than half the window, however wide the
+  // stored value was when it was saved on a bigger screen.
+  return Math.max(SIDEBAR_MIN, Math.min(620, Math.round(window.innerWidth * 0.5)));
+}
+
+function setSidebarWidth(width, { persist = true } = {}) {
+  const clamped = Math.round(Math.max(SIDEBAR_MIN, Math.min(sidebarMax(), width)));
+  document.documentElement.style.setProperty("--sidebar-width", `${clamped}px`);
+  elements.sidebarResizer?.setAttribute("aria-valuenow", String(clamped));
+  if (persist) {
+    localStorage.setItem(SIDEBAR_WIDTH_KEY, String(clamped));
+  }
+  return clamped;
+}
+
+function initializeSidebarWidth() {
+  const stored = Number(localStorage.getItem(SIDEBAR_WIDTH_KEY));
+  setSidebarWidth(Number.isFinite(stored) && stored > 0 ? stored : SIDEBAR_DEFAULT, {
+    persist: false,
+  });
+
+  const resizer = elements.sidebarResizer;
+  if (!resizer) {
+    return;
+  }
+  resizer.setAttribute("aria-valuemin", String(SIDEBAR_MIN));
+
+  const shell = document.querySelector(".app-shell");
+  let pointerId = null;
+
+  resizer.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) {
+      return;
+    }
+    pointerId = event.pointerId;
+    // Capture so the drag keeps tracking once the pointer leaves the 7px
+    // handle, which it does immediately.
+    resizer.setPointerCapture(pointerId);
+    shell?.classList.add("resizing");
+    event.preventDefault();
+  });
+
+  resizer.addEventListener("pointermove", (event) => {
+    if (pointerId === null) {
+      return;
+    }
+    // The sidebar starts at the viewport's left edge, so the pointer's x is the
+    // width outright.
+    setSidebarWidth(event.clientX, { persist: false });
+  });
+
+  const endDrag = () => {
+    if (pointerId === null) {
+      return;
+    }
+    resizer.releasePointerCapture?.(pointerId);
+    pointerId = null;
+    shell?.classList.remove("resizing");
+    // Persist once, at the end — not on every pointermove.
+    const current = parseInt(
+      getComputedStyle(document.documentElement).getPropertyValue("--sidebar-width"),
+      10,
+    );
+    if (Number.isFinite(current)) {
+      setSidebarWidth(current);
+    }
+  };
+  resizer.addEventListener("pointerup", endDrag);
+  resizer.addEventListener("pointercancel", endDrag);
+
+  resizer.addEventListener("dblclick", () => setSidebarWidth(SIDEBAR_DEFAULT));
+
+  // Keyboard, because a drag handle that only takes a mouse is not reachable.
+  resizer.addEventListener("keydown", (event) => {
+    const step = event.shiftKey ? 40 : 12;
+    const current = parseInt(
+      getComputedStyle(document.documentElement).getPropertyValue("--sidebar-width"),
+      10,
+    );
+    if (event.key === "ArrowLeft") {
+      setSidebarWidth(current - step);
+    } else if (event.key === "ArrowRight") {
+      setSidebarWidth(current + step);
+    } else if (event.key === "Home") {
+      setSidebarWidth(SIDEBAR_DEFAULT);
+    } else {
+      return;
+    }
+    event.preventDefault();
+  });
+
+  // A window that shrinks can leave a stored width taking most of it.
+  window.addEventListener("resize", () => {
+    const current = parseInt(
+      getComputedStyle(document.documentElement).getPropertyValue("--sidebar-width"),
+      10,
+    );
+    if (Number.isFinite(current) && current > sidebarMax()) {
+      setSidebarWidth(current, { persist: false });
+    }
+  });
+}
+
 elements.newChatButton.addEventListener("click", () => startNewChat());
 elements.openSidebarButton.addEventListener("click", () =>
   document.body.classList.add("sidebar-open"),
@@ -2735,6 +2852,7 @@ setInterval(() => {
 }, 60 * 1000);
 
 initializeTheme();
+initializeSidebarWidth();
 connectEventStream();
 await refreshBootstrap();
 startNewChat(state.bootstrap?.projects[0]?.id || "general");

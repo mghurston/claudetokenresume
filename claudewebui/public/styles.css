@@ -134,6 +134,53 @@ svg {
   background: var(--sidebar);
 }
 
+/**
+ * The drag handle on the sidebar's right edge.
+ *
+ * It sits inside the sidebar rather than between the grid columns so it does
+ * not need a column of its own — the grid stays two columns and only
+ * `--sidebar-width` changes. It is a hair wider than it looks (the visible line
+ * is the ::after) because a 1px target is a target you miss.
+ */
+.sidebar-resizer {
+  position: absolute;
+  z-index: 30;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 7px;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.sidebar-resizer::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--accent);
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.sidebar-resizer:hover::after,
+.sidebar-resizer:focus-visible::after,
+.app-shell.resizing .sidebar-resizer::after {
+  opacity: 1;
+}
+
+.sidebar-resizer:focus-visible {
+  outline: none;
+}
+
+/* While dragging, stop the pointer selecting session titles it passes over. */
+.app-shell.resizing {
+  user-select: none;
+  cursor: col-resize;
+}
+
 .sidebar-header {
   display: flex;
   align-items: center;
@@ -1739,6 +1786,12 @@ button.composer-control {
     inset: 0 auto 0 0;
     transform: translateX(-102%);
     transition: transform 180ms ease;
+  }
+
+  /* The sidebar is a slide-over here, not a column — there is nothing to
+     resize against, and the handle would sit under the drawer's own edge. */
+  .sidebar-resizer {
+    display: none;
   }
 
   body.sidebar-open .sidebar {

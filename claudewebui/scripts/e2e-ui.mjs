@@ -181,6 +181,64 @@ try {
   );
   await page.evaluate(() => document.querySelector("#usageDialog").close());
 
+  // --- resizable sidebar ---------------------------------------------------
+  const sidebarWidth = () =>
+    page.evaluate(() =>
+      Math.round(document.querySelector("#sidebar").getBoundingClientRect().width),
+    );
+  const handle = page.locator("#sidebarResizer");
+  check("the sidebar has a drag handle", await handle.isVisible());
+
+  const startWidth = await sidebarWidth();
+  const dragTo = async (x) => {
+    const box = await handle.boundingBox();
+    await page.mouse.move(box.x + box.width / 2, 400);
+    await page.mouse.down();
+    await page.mouse.move(x, 400, { steps: 12 });
+    await page.mouse.up();
+  };
+
+  await dragTo(480);
+  const wider = await sidebarWidth();
+  check("dragging right widens it", wider > startWidth + 100, `${startWidth} -> ${wider}`);
+
+  await dragTo(240);
+  const narrower = await sidebarWidth();
+  check("dragging left narrows it", narrower < wider - 100, `${wider} -> ${narrower}`);
+
+  // The clamps matter: below the minimum session titles are unreadable, above
+  // the maximum the conversation gets squeezed out of its own window.
+  await dragTo(20);
+  check("it will not collapse past the minimum", (await sidebarWidth()) === 210);
+  await dragTo(1260);
+  const clampedHigh = await sidebarWidth();
+  check("it will not swallow the conversation", clampedHigh === 620, String(clampedHigh));
+
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await page.waitForFunction(
+    () => document.querySelectorAll("#modeSelect option").length > 0,
+    { timeout: 20000 },
+  );
+  check(
+    "the width survives a reload",
+    (await sidebarWidth()) === clampedHigh,
+    String(await sidebarWidth()),
+  );
+
+  await handle.dblclick();
+  await page.waitForTimeout(200);
+  check("double-click resets it", (await sidebarWidth()) === 310);
+
+  await handle.focus();
+  await page.keyboard.press("ArrowRight");
+  await page.waitForTimeout(150);
+  check("arrow keys resize it", (await sidebarWidth()) === 322, String(await sidebarWidth()));
+
+  check(
+    "no horizontal overflow at any width",
+    await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1),
+  );
+
   // --- quit ----------------------------------------------------------------
   await page.click("#quitButton");
   await page.waitForSelector("#quitDialog[open]", { timeout: 10000 });
