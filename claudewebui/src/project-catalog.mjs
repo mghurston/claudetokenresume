@@ -317,7 +317,10 @@ export class ProjectCatalog {
       const { stdout } = await execFileAsync(
         "git",
         ["-C", projectPath, "remote", "get-url", "origin"],
-        { timeout: 3000 },
+        // windowsHide or this pops a console window — once per project, on every
+        // catalog rebuild. With a handful of projects the screen visibly
+        // flickers with terminals every time the sidebar refreshes.
+        { timeout: 3000, windowsHide: true },
       );
       repoUrl = githubUrl(stdout);
     } catch {

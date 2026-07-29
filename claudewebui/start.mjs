@@ -49,10 +49,66 @@ const PRESET = (process.env.CLAUDE_STUDIO_ON_CONFLICT || "").trim().toLowerCase(
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-function openBrowser(url) {
-  if (process.env.CLAUDE_STUDIO_OPEN === "0") {
-    return;
+/**
+ * Browsers that can host a page as a plain application window.
+ *
+ * `--app=<url>` opens the page in its own window with no tabs, no address bar
+ * and its own taskbar entry — a Windows window, like the desktop watch, rather
+ * than one tab among thirty. Nothing is installed for this: it is a flag on a
+ * browser the machine already has.
+ */
+function appWindowCandidates() {
+  const programFiles = [
+    process.env["ProgramFiles(x86)"],
+    process.env.ProgramFiles,
+    process.env.LOCALAPPDATA,
+  ].filter(Boolean);
+
+  if (process.platform === "win32") {
+    const relative = [
+      "Microsoft/Edge/Application/msedge.exe",
+      "Google/Chrome/Application/chrome.exe",
+      "BraveSoftware/Brave-Browser/Application/brave.exe",
+    ];
+    return programFiles.flatMap((root) =>
+      relative.map((tail) => path.join(root, tail.replaceAll("/", path.sep))),
+    );
   }
+  if (process.platform === "darwin") {
+    return [
+      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+      "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+    ];
+  }
+  return ["/usr/bin/google-chrome", "/usr/bin/chromium", "/usr/bin/microsoft-edge"];
+}
+
+/**
+ * Opens Studio as its own window, falling back to an ordinary browser tab.
+ *
+ * The fallback is not optional: a machine with no Chromium-based browser must
+ * still be able to open Studio, and `--app` silently produces nothing when the
+ * binary is missing.
+ */
+function openStudioWindow(url) {
+  if (process.env.CLAUDE_STUDIO_OPEN === "0") {
+    return "suppressed";
+  }
+
+  if (process.env.CLAUDE_STUDIO_WINDOW !== "tab") {
+    const browser = appWindowCandidates().find((candidate) => existsSync(candidate));
+    if (browser) {
+      const child = spawn(browser, [`--app=${url}`, "--window-size=1360,940"], {
+        detached: true,
+        stdio: "ignore",
+        windowsHide: true,
+      });
+      child.on("error", () => {});
+      child.unref();
+      return "window";
+    }
+  }
+
   const command =
     process.platform === "darwin"
       ? { file: "open", args: [url] }
@@ -62,7 +118,10 @@ function openBrowser(url) {
   spawn(command.file, command.args, { detached: true, stdio: "ignore", windowsHide: true })
     .on("error", () => {})
     .unref();
+  return "tab";
 }
+
+const openBrowser = openStudioWindow;
 
 /** True once the server on `port` answers its unauthenticated ping. */
 async function waitForStudio(origin, timeoutMs = 60000) {
@@ -146,9 +205,12 @@ async function launch(port) {
   }
 
   const href = (await launchHrefFor(port, origin)) || origin;
-  openBrowser(href);
+  const opened = openStudioWindow(href);
 
   console.log("");
+  if (opened === "tab") {
+    console.log("  Opened in your browser (no Chrome or Edge found for an app window).");
+  }
   console.log(`  Claude CLI Studio is running at ${origin}`);
   console.log(`  It keeps running after you close this window (pid ${pid}).`);
   console.log("");

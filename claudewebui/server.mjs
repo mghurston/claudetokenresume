@@ -1255,6 +1255,8 @@ function openBrowser(url) {
   const child = spawn(command.executable, command.args, {
     detached: true,
     stdio: "ignore",
+    // `cmd /c start` flashes a console window without this.
+    windowsHide: true,
   });
   child.on("error", () => {});
   child.unref();
