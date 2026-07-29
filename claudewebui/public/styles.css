@@ -210,6 +210,45 @@ svg {
   height: 18px;
 }
 
+/**
+ * Quit carries a word, not just a glyph.
+ *
+ * Closing the window no longer stops Studio, so this button is the answer to
+ * "how do I stop it" — and as a third unlabeled icon in a row it was one people
+ * looked straight past.
+ */
+.quit-button {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.quit-button svg {
+  width: 15px;
+  height: 15px;
+}
+
+.quit-button:hover {
+  border-color: color-mix(in srgb, var(--danger) 55%, var(--border));
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  color: var(--danger);
+}
+
+.quit-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 .icon-button.subtle {
   width: 28px;
   height: 28px;
