@@ -178,8 +178,54 @@ every reload, silently, which turned "I set Autopilot and left" into "it asked
 me anyway" the moment the tab was reopened.
 
 `scripts/e2e-permission-mode.mjs` covers all of this against a real server and a
-real CLI. It is deliberately outside `test/`, because `node --test` sweeps that
-directory and this one spends real tokens.
+real CLI; `scripts/e2e-ui.mjs` drives the actual browser with Playwright. Both
+live outside `test/`, because `node --test` sweeps that directory and these
+spend real tokens.
+
+### Studio outlives its launcher window
+
+`npm start` runs **`start.mjs`**, not `server.mjs`. It resolves any port
+conflict in the console — where a prompt still works and a person is still
+watching — then spawns `server.mjs` **detached** (`detached`, `windowsHide`, no
+inherited stdio, output to `~/.claude-cli-studio/studio.log`), waits for
+`/api/ping`, opens the browser, and exits. On Windows a detached child gets no
+console, so the close event that used to kill Studio mid-conversation never
+reaches it. `npm run server` still runs the server in the foreground.
+
+Because closing the window no longer stops Studio, there are two deliberate ways
+to stop it, and they must both keep working: the **Quit** button in the sidebar
+and the **Stop it** choice the launcher offers when you start it while one is
+already running. Both go through `POST /api/shutdown` -> `quitStudio()` ->
+`shutdown()`.
+
+`/api/shutdown` accepts the **launch token as well as** the session token, and is
+gated *before* the session-token wall. A second launcher has only the launch
+token from `runtime.json`, and asking over HTTP is what lets a detached server
+dispose its `claude` runners — a signal would orphan them, which the old
+console-window teardown used to prevent for free. `stopRunningStudio` therefore
+tries HTTP first and only then falls back to a signal.
+
+The port-holder logic lives in `src/port-guard.mjs` so `start.mjs` and
+`server.mjs` classify a holder identically. `server.mjs` keeps its `EADDRINUSE`
+handler for the race where the port goes busy between the check and the bind.
+The rule is unchanged and still absolute: **never stop a process that was not
+positively identified as Studio.**
+
+### Usage meters
+
+The sidebar meter is **always visible**, and clicking it opens a Usage dialog
+with both windows — percent, exact reset clock time, and a countdown each. It
+used to hide itself whenever utilization was unknown, which was nearly always,
+since numbers only arrive from a live turn's `rate_limit_event`. So
+`classifyProbe` now returns `windows.fiveHour` / `windows.weekly` separately
+alongside the flat blocking-window fields, `LimitWatch` merges per window (an
+SDK event describes only one, so it must never blank the other), and the server
+runs **one** probe at startup.
+
+That probe is deliberately **not** on a timer: it is a real `/v1/messages` call
+against the user's own window, so polling it to keep a bar fresh would spend the
+very thing it is measuring. `POST /api/limit/refresh` backs the Refresh button
+for when someone actually wants a new reading.
 
 A queued message cannot be cancelled: the protocol has `cancel_async_message`
 and `interrupt`'s `cancel_queued`, but the SDK's public `Query` API exposes

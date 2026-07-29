@@ -28,12 +28,7 @@ if not exist "node_modules\" (
   )
 )
 
-echo Starting Claude CLI Studio - close this window to stop it.
-echo.
 call npm start
-
-echo.
-echo Claude CLI Studio has stopped.
 
 :done
 echo.

@@ -72,6 +72,16 @@ const elements = {
   browsePath: document.querySelector("#browsePath"),
   browseRoots: document.querySelector("#browseRoots"),
   browseUp: document.querySelector("#browseUp"),
+  usageDialog: document.querySelector("#usageDialog"),
+  usageNote: document.querySelector("#usageNote"),
+  usageRefresh: document.querySelector("#usageRefresh"),
+  usageWindows: document.querySelector("#usageWindows"),
+  quitButton: document.querySelector("#quitButton"),
+  quitConfirm: document.querySelector("#quitConfirm"),
+  quitDialog: document.querySelector("#quitDialog"),
+  quitForm: document.querySelector("#quitForm"),
+  quitOverlay: document.querySelector("#quitOverlay"),
+  quitWarning: document.querySelector("#quitWarning"),
   restartButton: document.querySelector("#restartButton"),
   restartConfirm: document.querySelector("#restartConfirm"),
   restartDialog: document.querySelector("#restartDialog"),
@@ -452,6 +462,57 @@ elements.restartForm?.addEventListener("submit", (event) => {
   restartStudio();
 });
 
+/**
+ * Stops the server for good.
+ *
+ * This exists because Studio now outlives the window that launched it: closing
+ * that window is no longer a way to stop it, so there has to be one here. The
+ * overlay stays up afterwards rather than retrying — unlike Restart, nothing is
+ * coming back.
+ */
+async function quitStudio() {
+  try {
+    await api("/api/shutdown", { method: "POST" });
+  } catch (error) {
+    // A 401 is never a retry — `api` has already raised the sign-in card.
+    if (error.status === 401) {
+      return;
+    }
+    if (error.status) {
+      showToast(error.message, "error");
+      return;
+    }
+    // No status: the connection died under its own response, which is what
+    // stopping looks like from here.
+  }
+  elements.quitOverlay?.classList.remove("hidden");
+}
+
+elements.quitButton?.addEventListener("click", () => {
+  const running = state.runningSessions.size;
+  const queued = state.queue.length;
+  const warnings = [];
+  if (running) {
+    warnings.push(
+      `${running} ${running === 1 ? "turn is" : "turns are"} still running and will be stopped`,
+    );
+  }
+  if (queued) {
+    warnings.push(
+      `${queued} queued ${queued === 1 ? "message" : "messages"} will be discarded`,
+    );
+  }
+  elements.quitWarning.textContent = warnings.length ? `${warnings.join(", and ")}.` : "";
+  elements.quitWarning.classList.toggle("hidden", warnings.length === 0);
+  elements.quitDialog.showModal();
+});
+
+elements.quitForm?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  elements.quitDialog.close();
+  quitStudio();
+});
+
 function showToast(message, type = "info") {
   const toast = document.createElement("div");
   toast.className = `toast ${type === "error" ? "error" : ""}`;
@@ -732,12 +793,20 @@ function renderLimitMeter() {
   const utilization = typeof limit?.utilization === "number" ? limit.utilization : null;
   const capped = limit?.status === "capped";
 
-  if (!limit || (utilization === null && !capped)) {
-    elements.limitMeter.classList.add("hidden");
-    return;
-  }
+  // The meter stays up even with nothing to draw yet. It used to hide itself
+  // whenever utilization was unknown, which was almost always — the numbers
+  // only arrive from a live turn or a probe — so the one thing people wanted to
+  // glance at was missing precisely when nothing was running.
   elements.limitMeter.classList.remove("hidden");
   elements.limitMeter.classList.toggle("capped", capped);
+
+  if (!limit || (utilization === null && !capped)) {
+    elements.limitLabel.textContent = "Usage";
+    elements.limitValue.textContent = "—";
+    elements.limitBar.style.width = "0%";
+    elements.limitDetail.textContent = "Click to check";
+    return;
+  }
 
   const percent = capped ? 100 : Math.max(0, Math.min(100, Math.round(utilization)));
   elements.limitLabel.textContent = capped ? "Usage limit reached" : "5-hour usage";
@@ -764,7 +833,116 @@ function renderLimitMeter() {
     details.push("watching");
   }
   elements.limitDetail.textContent = details.join(" · ");
+  if (elements.usageDialog?.open) {
+    renderUsageDialog();
+  }
 }
+
+function formatAgo(epochMs) {
+  if (!epochMs) {
+    return "not checked yet";
+  }
+  const minutes = Math.round((Date.now() - epochMs) / 60000);
+  if (minutes < 1) {
+    return "updated just now";
+  }
+  if (minutes < 60) {
+    return `updated ${minutes} min ago`;
+  }
+  return `updated ${Math.floor(minutes / 60)}h ago`;
+}
+
+/**
+ * Both usage windows, side by side.
+ *
+ * The sidebar meter can only show one number; this is where "which window is
+ * actually about to stop me, and when does it come back" gets answered. Each
+ * window states its own reset clock time *and* a countdown, because "resets
+ * 12:40pm" and "in 3h 20m" answer different questions.
+ */
+function renderUsageDialog() {
+  const limit = state.limit || {};
+  const windows = limit.windows || {};
+  const rows = [
+    { key: "fiveHour", name: "5-hour window", data: windows.fiveHour },
+    { key: "weekly", name: "Weekly window", data: windows.weekly },
+  ];
+
+  elements.usageWindows.replaceChildren();
+  for (const row of rows) {
+    const percent =
+      typeof row.data?.utilization === "number"
+        ? Math.max(0, Math.min(100, Math.round(row.data.utilization)))
+        : null;
+    const rejected = String(row.data?.status || "").toLowerCase() === "rejected";
+
+    const block = document.createElement("div");
+    block.className = `usage-window${rejected ? " capped" : ""}`;
+
+    const head = document.createElement("div");
+    head.className = "usage-window-head";
+    const name = document.createElement("span");
+    name.textContent = row.name;
+    const value = document.createElement("strong");
+    value.textContent = percent === null ? "—" : `${percent}%`;
+    head.append(name, value);
+
+    const bar = document.createElement("div");
+    bar.className = "limit-bar";
+    const fill = document.createElement("span");
+    fill.style.width = `${percent ?? 0}%`;
+    bar.append(fill);
+
+    const note = document.createElement("small");
+    if (row.data?.resetAt) {
+      note.textContent = `Resets ${formatClockTime(row.data.resetAt)} · in ${formatCountdown(row.data.resetAt)}`;
+    } else if (percent === null) {
+      note.textContent = "No reading yet.";
+    } else {
+      note.textContent = rejected ? "Spent — waiting for a reset time." : "Not constrained.";
+    }
+
+    block.append(head, bar, note);
+    elements.usageWindows.append(block);
+  }
+
+  const notes = [formatAgo(limit.lastCheckedAt)];
+  if (limit.usingOverage) {
+    notes.push("Overage credits are covering requests right now.");
+  }
+  if (limit.status === "capped") {
+    notes.push("Work is being refused.");
+  }
+  elements.usageNote.textContent = notes.join(" · ");
+}
+
+elements.limitMeter?.addEventListener("click", () => {
+  renderUsageDialog();
+  elements.usageDialog.showModal();
+  // A meter with no reading is the reason most people click it, so make the
+  // click do the obvious thing rather than showing two empty bars.
+  if (!state.limit || state.limit.lastCheckedAt === null) {
+    refreshUsage();
+  }
+});
+
+async function refreshUsage() {
+  elements.usageRefresh.disabled = true;
+  elements.usageRefresh.textContent = "Checking…";
+  try {
+    const result = await api("/api/limit/refresh", { method: "POST" });
+    state.limit = result.limit;
+    renderLimitMeter();
+    renderUsageDialog();
+  } catch (error) {
+    showToast(error.message, "error");
+  } finally {
+    elements.usageRefresh.disabled = false;
+    elements.usageRefresh.textContent = "Refresh";
+  }
+}
+
+elements.usageRefresh?.addEventListener("click", refreshUsage);
 
 function applyWatchState({ limit, queue }) {
   if (limit) {

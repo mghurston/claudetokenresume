@@ -1,7 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { existsSync, realpathSync, statSync } from "node:fs";
-import { chmod, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -30,6 +30,14 @@ import {
   modeAutoApproves,
   permissionResultFor,
 } from "./src/permission-decisions.mjs";
+import {
+  askChoice,
+  findFreePort as guardFindFreePort,
+  findPortOwner as guardFindPortOwner,
+  probePortHolder as guardProbePortHolder,
+  runningStudioLaunchHref as guardRunningStudioLaunchHref,
+  stopProcessAndWait,
+} from "./src/port-guard.mjs";
 import { isWithin, ProjectCatalog, slugifyProjectId } from "./src/project-catalog.mjs";
 import { isSessionId, SessionCatalog } from "./src/session-catalog.mjs";
 import { StateStore } from "./src/state-store.mjs";
@@ -124,171 +132,14 @@ async function writeRuntimeFile() {
   );
 }
 
-/**
- * Asks whatever holds our port what it is.
- *
- * `current` — this build, which answers /api/ping.
- * `legacy`  — an older Studio: /api/ping predates it, so the request falls
- *             through to the auth gate and 401s with Studio's own wording.
- *             Worth recognising, because upgrading is exactly when someone
- *             double-clicks the launcher while the old one is still up.
- * `foreign` — HTTP, but not us. Never killed automatically.
- */
-async function probePortHolder() {
-  let response;
-  try {
-    response = await fetch(new URL("/api/ping", EXPECTED_ORIGIN), {
-      signal: AbortSignal.timeout(2500),
-    });
-  } catch {
-    return "foreign";
-  }
-  const body = await response.json().catch(() => null);
-  if (body?.app === "claude-cli-studio") {
-    return "current";
-  }
-  if (response.status === 401 && /Studio authentication/i.test(body?.error || "")) {
-    return "legacy";
-  }
-  return "foreign";
-}
-
-/**
- * The pid listening on our port, plus a human name for it.
- *
- * Only used to tell the user what they would be stopping, and to stop it once
- * they say so. A `legacy` Studio predates runtime.json, so asking the OS is
- * the only way to name it.
- */
-async function findPortOwner() {
-  try {
-    if (process.platform === "win32") {
-      const { stdout } = await execFileAsync("netstat", ["-ano", "-p", "tcp"], {
-        timeout: 8000,
-        windowsHide: true,
-      });
-      const line = stdout
-        .split(/\r?\n/)
-        .find((row) => /LISTENING/i.test(row) && new RegExp(`[:.]${PORT}\\s`).test(row));
-      const pid = Number(line?.trim().split(/\s+/).pop());
-      if (!Number.isInteger(pid) || pid <= 0) {
-        return null;
-      }
-      const { stdout: task } = await execFileAsync(
-        "tasklist",
-        ["/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"],
-        { timeout: 8000, windowsHide: true },
-      );
-      return { pid, name: task.split(",")[0]?.replace(/"/g, "").trim() || "unknown" };
-    }
-    const { stdout } = await execFileAsync(
-      "lsof",
-      ["-nP", `-iTCP:${PORT}`, "-sTCP:LISTEN", "-t"],
-      { timeout: 8000 },
-    );
-    const pid = Number(stdout.trim().split(/\s+/)[0]);
-    if (!Number.isInteger(pid) || pid <= 0) {
-      return null;
-    }
-    const { stdout: name } = await execFileAsync("ps", ["-p", String(pid), "-o", "comm="], {
-      timeout: 8000,
-    });
-    return { pid, name: name.trim() || "unknown" };
-  } catch {
-    return null;
-  }
-}
-
-/** The launch URL of the running Studio, when it left a readable record. */
-async function runningStudioLaunchHref() {
-  let record;
-  try {
-    record = JSON.parse(await readFile(RUNTIME_FILE, "utf8"));
-  } catch {
-    return null;
-  }
-  if (!record || record.port !== PORT || typeof record.launchToken !== "string") {
-    return null;
-  }
-  const href = new URL("/", String(record.origin || EXPECTED_ORIGIN));
-  href.searchParams.set("launch", record.launchToken);
-  return href.href;
-}
-
-/** Stops a process and waits for the port to actually come free. */
-async function stopProcessAndWait(pid) {
-  try {
-    process.kill(pid, "SIGTERM");
-  } catch (error) {
-    if (error.code === "ESRCH") {
-      return true;
-    }
-    if (error.code === "EPERM") {
-      return false;
-    }
-  }
-  for (let attempt = 0; attempt < 30; attempt += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 250));
-    try {
-      process.kill(pid, 0);
-    } catch {
-      return true;
-    }
-    // Node on Windows treats SIGTERM as a hard kill, so one signal is enough
-    // there; on POSIX a wedged process may need the stronger one.
-    if (attempt === 12 && process.platform !== "win32") {
-      try {
-        process.kill(pid, "SIGKILL");
-      } catch {
-        /* already gone */
-      }
-    }
-  }
-  return false;
-}
-
-/** The first free port at or after `from`, so a clash needs no env var. */
-async function findFreePort(from) {
-  for (let candidate = from; candidate < from + 25; candidate += 1) {
-    const free = await new Promise((resolve) => {
-      const probe = http.createServer();
-      probe.once("error", () => resolve(false));
-      probe.listen(candidate, HOST, () => probe.close(() => resolve(true)));
-    });
-    if (free) {
-      return candidate;
-    }
-  }
-  return null;
-}
-
-/**
- * Asks the person who double-clicked the launcher what to do. Returns null
- * when nobody is there to answer — a service, a CI run, an editor's task
- * runner — so an unattended start never blocks on a prompt.
- */
-async function askChoice(question, choices) {
-  if (!process.stdin.isTTY || !process.stdout.isTTY) {
-    return null;
-  }
-  const { createInterface } = await import("node:readline/promises");
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  try {
-    console.log(`\n${question}\n`);
-    for (const choice of choices) {
-      console.log(`  [${choice.key.toUpperCase()}] ${choice.label}${choice.default ? "  (press Enter)" : ""}`);
-    }
-    const answer = (await rl.question("\nChoose: ")).trim().toLowerCase();
-    if (!answer) {
-      return choices.find((choice) => choice.default)?.key ?? null;
-    }
-    return choices.find((choice) => choice.key === answer)?.key ?? null;
-  } catch {
-    return null;
-  } finally {
-    rl.close();
-  }
-}
+// These four are the shared port-guard logic, bound to this server's port so
+// the rest of the file reads as it did. `start.mjs` uses the same module, which
+// is what keeps the two entry points classifying a port holder identically.
+const probePortHolder = () => guardProbePortHolder(EXPECTED_ORIGIN);
+const findPortOwner = () => guardFindPortOwner(PORT);
+const runningStudioLaunchHref = () =>
+  guardRunningStudioLaunchHref(RUNTIME_FILE, PORT, EXPECTED_ORIGIN);
+const findFreePort = (from) => guardFindFreePort(from, HOST);
 
 /**
  * Clears `launch-<pid>` directories left by servers that were killed rather
@@ -733,11 +584,25 @@ function tokenMatches(candidate, expectedToken) {
   return expected.length === actual.length && timingSafeEqual(expected, actual);
 }
 
+function bearerToken(request) {
+  return String(request.headers.authorization || "").match(/^Bearer ([A-Za-z0-9_-]+)$/)?.[1];
+}
+
 function requestIsAuthenticated(request) {
-  const match = String(request.headers.authorization || "").match(
-    /^Bearer ([A-Za-z0-9_-]+)$/,
-  );
-  return tokenMatches(match?.[1], SESSION_TOKEN);
+  return tokenMatches(bearerToken(request), SESSION_TOKEN);
+}
+
+/**
+ * Shutdown also accepts the launch token.
+ *
+ * A second launcher offering "Stop it" has the launch token from
+ * `runtime.json` and no way to get a session token — and asking politely over
+ * HTTP is how a detached server gets to dispose its `claude` runners instead of
+ * having them orphaned by a signal.
+ */
+function requestMayShutDown(request) {
+  const token = bearerToken(request);
+  return tokenMatches(token, SESSION_TOKEN) || tokenMatches(token, LAUNCH_TOKEN);
 }
 
 function authorizeBrowser(response) {
@@ -946,6 +811,13 @@ async function handleApi(request, response, url) {
 
   // Answer before restarting: the response rides a connection this is about to
   // close, and the browser needs the 202 to start polling /api/ping.
+  // Backs the Refresh button in the Usage dialog. On demand only — see the
+  // startup probe for why this is never on a timer.
+  if (request.method === "POST" && url.pathname === "/api/limit/refresh") {
+    json(response, 200, { limit: await limitWatch.check() });
+    return true;
+  }
+
   if (request.method === "POST" && url.pathname === "/api/restart") {
     json(response, 202, { restarting: true });
     setTimeout(() => {
@@ -1337,6 +1209,20 @@ const server = http.createServer(async (request, response) => {
       json(response, 200, { app: "claude-cli-studio" });
       return;
     }
+    // Quitting is the one thing a launcher can ask for with only the launch
+    // token, so it is gated before the session-token wall rather than behind it.
+    if (request.method === "POST" && url.pathname === "/api/shutdown") {
+      enforceSameOrigin(request, ALLOWED_ORIGINS);
+      if (!requestMayShutDown(request)) {
+        json(response, 401, { error: "Studio authentication is required." });
+        return;
+      }
+      json(response, 202, { stopping: true });
+      setTimeout(() => {
+        quitStudio().catch(() => process.exit(1));
+      }, 150);
+      return;
+    }
     if (url.pathname.startsWith("/api/")) {
       if (!requestIsAuthenticated(request)) {
         json(response, 401, { error: "Studio authentication is required." });
@@ -1519,6 +1405,13 @@ server.on("error", async (error) => {
 server.listen(PORT, HOST, async () => {
   await writeRuntimeFile().catch(() => {});
   await pruneStaleLaunchDirectories();
+  // One probe at startup so the usage meter has numbers to draw immediately.
+  // Without it the sidebar stays blank until a turn happens to report a
+  // rate_limit_event, which is exactly when you are least likely to be looking.
+  // It is not repeated on a timer: a probe is a real /v1/messages call against
+  // the user's own window, so polling it to keep a bar fresh would be
+  // self-defeating. The Refresh button in the Usage dialog asks for more.
+  limitWatch.check().catch(() => {});
   console.log(`Claude CLI Studio is running at ${EXPECTED_ORIGIN}`);
   console.log(`Workspace root: ${WORKSPACE_ROOT}`);
   const cli = await cliInfo();
@@ -1561,6 +1454,20 @@ async function shutdown() {
   server.closeAllConnections?.();
   await new Promise((resolve) => server.close(resolve));
   await claude.stop();
+}
+
+/**
+ * Stops Studio for good, at the user's request.
+ *
+ * This is what the sidebar's Quit button and the launcher's "Stop it" both
+ * reach. It matters more now than it used to: once Studio survives the window
+ * that launched it, closing that window is no longer a way to stop it, so there
+ * has to be one that is.
+ */
+async function quitStudio() {
+  console.log("Stopping at your request…");
+  await shutdown();
+  process.exit(0);
 }
 
 /**

@@ -77,14 +77,14 @@
           </div>
         </nav>
 
-        <div class="limit-meter hidden" id="limitMeter">
+        <button class="limit-meter" id="limitMeter" type="button" title="Show usage detail">
           <div class="limit-row">
             <span class="limit-label" id="limitLabel">Usage</span>
             <span class="limit-value" id="limitValue"></span>
           </div>
           <div class="limit-bar"><span id="limitBar"></span></div>
           <small class="limit-detail" id="limitDetail"></small>
-        </div>
+        </button>
 
         <footer class="sidebar-footer">
           <div class="connection-row">
@@ -98,6 +98,12 @@
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="M20 12a8 8 0 1 1-2.3-5.6"/>
               <path d="M20 4v4.5h-4.5"/>
+            </svg>
+          </button>
+          <button class="icon-button" id="quitButton" aria-label="Quit Studio" title="Quit Studio">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 3v9"/>
+              <path d="M18.4 6.6a9 9 0 1 1-12.8 0"/>
             </svg>
           </button>
           <button class="icon-button" id="themeButton" aria-label="Toggle theme">
@@ -306,6 +312,59 @@
         </footer>
       </form>
     </dialog>
+
+    <dialog id="usageDialog" class="studio-dialog compact-dialog">
+      <form method="dialog" id="usageForm">
+        <header>
+          <div>
+            <h2>Usage</h2>
+            <p>
+              The same numbers the Claude app&rsquo;s usage panel shows, read from
+              your plan&rsquo;s rate-limit headers.
+            </p>
+          </div>
+        </header>
+
+        <div class="usage-windows" id="usageWindows"></div>
+        <p class="usage-note" id="usageNote"></p>
+
+        <footer>
+          <button class="button secondary" type="button" id="usageRefresh">Refresh</button>
+          <button class="button primary" type="submit">Close</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <dialog id="quitDialog" class="studio-dialog compact-dialog">
+      <form method="dialog" id="quitForm">
+        <header>
+          <div>
+            <h2>Quit Studio?</h2>
+            <p>
+              Studio&rsquo;s server stops. Anything Claude is working on right now
+              stops with it. Conversations are kept &mdash; they live in
+              <code>~/.claude</code> &mdash; so starting Studio again picks them
+              back up.
+            </p>
+          </div>
+        </header>
+        <p class="restart-warning hidden" id="quitWarning"></p>
+        <footer>
+          <button class="button secondary" type="button" data-close-dialog>Cancel</button>
+          <button class="button primary" type="submit" id="quitConfirm">Quit</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <div class="signin-overlay hidden" id="quitOverlay">
+      <div class="signin-card">
+        <strong>Studio has stopped.</strong>
+        <p>
+          You can close this tab. To start it again, open Claude Studio from
+          where you launched it.
+        </p>
+      </div>
+    </div>
 
     <div class="signin-overlay hidden" id="restartOverlay">
       <div class="signin-card">

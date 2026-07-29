@@ -36,7 +36,17 @@ reimplements.
 
 Double-click **`Claude Studio.cmd`** (Windows) or **`Claude Studio.command`**
 (macOS) in the folder above this one. Either one installs dependencies on first
-run, starts the server, and opens your browser. Close the window to stop it.
+run, starts the server, and opens your browser.
+
+**Studio keeps running after you close that window.** It is started as a
+background process on purpose, so a stray window close can't kill Claude
+mid-task. Two ways to stop it:
+
+- the **Quit** button at the bottom of the sidebar, or
+- run the launcher again and choose **Stop it**.
+
+Running the launcher while Studio is already up offers to open it, stop it, or
+replace it — it never just fails.
 
 On macOS, Finder needs the executable bit once:
 
@@ -52,8 +62,20 @@ npm install
 npm start
 ```
 
-Studio opens an authenticated browser tab at <http://127.0.0.1:4174>. Keep the
-terminal open while using it; `Ctrl+C` stops it.
+Studio opens an authenticated browser tab at <http://127.0.0.1:4174> and then
+detaches, so the terminal is free. Its output goes to
+`~/.claude-cli-studio/studio.log`. Use `npm run server` instead if you want it
+in the foreground with `Ctrl+C` to stop it.
+
+## Usage
+
+The meter at the bottom of the sidebar shows how much of your 5-hour window is
+spent. Click it for both windows — 5-hour and weekly — with each one's exact
+reset time and a countdown, plus a Refresh button.
+
+Studio checks once at startup and then rides on what live turns report. It does
+not poll: a check is a real API call against your own usage window, so polling
+it to keep a bar up to date would spend the thing it is measuring.
 
 `npm install` is required: the Claude Agent SDK ships prebuilt CLI binaries for
 every platform plus a few peer packages, so `node_modules` lands around 290 MB.

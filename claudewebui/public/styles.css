@@ -1892,8 +1892,23 @@ button.composer-control {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  width: 100%;
   padding: 9px 12px;
+  border: 0;
   border-top: 1px solid var(--border);
+  background: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.limit-meter:hover {
+  background: color-mix(in srgb, var(--text) 5%, transparent);
+}
+
+.limit-meter:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 .limit-row {
@@ -1943,4 +1958,53 @@ button.composer-control {
 .limit-detail {
   color: var(--text-faint);
   font-size: 9.5px;
+}
+
+.usage-windows {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 4px 0 8px;
+}
+
+.usage-window {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.usage-window-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12.5px;
+}
+
+.usage-window-head strong {
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-window .limit-bar {
+  height: 6px;
+}
+
+.usage-window.capped .limit-bar > span {
+  background: var(--danger);
+}
+
+.usage-window.capped .usage-window-head strong {
+  color: var(--danger);
+}
+
+.usage-window small {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.usage-note {
+  margin: 0;
+  color: var(--text-faint);
+  font-size: 11px;
 }

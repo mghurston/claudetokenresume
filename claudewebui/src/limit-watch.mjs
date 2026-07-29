@@ -173,19 +173,39 @@ export function classifyProbe(headers, httpStatus) {
       ? weeklyReset
       : fiveHourReset;
 
+  const fiveHourUtilization = toPercent(
+    headerValue(
+      headers,
+      "anthropic-ratelimit-unified-5h-utilization",
+      "anthropic-ratelimit-unified-utilization",
+    ),
+  );
+  const weeklyUtilization = toPercent(
+    headerValue(headers, "anthropic-ratelimit-unified-7d-utilization"),
+  );
+
   return {
     status,
     resetAt: toEpochMs(blockingReset),
-    utilization: toPercent(
-      headerValue(
-        headers,
-        "anthropic-ratelimit-unified-5h-utilization",
-        "anthropic-ratelimit-unified-utilization",
-      ),
-    ),
-    weeklyUtilization: toPercent(
-      headerValue(headers, "anthropic-ratelimit-unified-7d-utilization"),
-    ),
+    utilization: fiveHourUtilization,
+    weeklyUtilization,
+    // Both windows, kept apart. The flat fields above answer "are we blocked and
+    // until when"; these answer "how much of each window is left", which is what
+    // the Usage panel shows and what the sidebar meter needs to draw anything at
+    // all. Collapsing them to the blocking one left the meter blank whenever
+    // nothing was blocking, which is nearly always.
+    windows: {
+      fiveHour: {
+        status: fiveHourStatus || null,
+        resetAt: toEpochMs(fiveHourReset),
+        utilization: fiveHourUtilization,
+      },
+      weekly: {
+        status: weeklyStatus || null,
+        resetAt: toEpochMs(weeklyReset),
+        utilization: weeklyUtilization,
+      },
+    },
     usingOverage: overageInUse === "true",
     limitType: headerValue(headers, "anthropic-ratelimit-unified-representative-claim"),
     detail:
@@ -216,11 +236,23 @@ export function classifyRateLimitEvent(info) {
     status = overageCarrying ? "lifted" : "capped";
   }
 
+  // The event describes one window — whichever the CLI reports as
+  // representative. Attribute it to that window only, so a 5-hour reading never
+  // overwrites what we know about the weekly one, or vice versa.
+  const resetAt = toEpochMs(info.resetsAt);
+  const utilization = toPercent(info.utilization);
+  const isWeekly = /7d|week/i.test(String(info.rateLimitType || ""));
+  const window = { status: info.status || null, resetAt, utilization };
+
   return {
     status,
-    resetAt: toEpochMs(info.resetsAt),
-    utilization: toPercent(info.utilization),
-    weeklyUtilization: null,
+    resetAt,
+    utilization: isWeekly ? null : utilization,
+    weeklyUtilization: isWeekly ? utilization : null,
+    windows: {
+      fiveHour: isWeekly ? null : window,
+      weekly: isWeekly ? window : null,
+    },
     usingOverage: info.isUsingOverage === true || info.overageInUse === true,
     limitType: info.rateLimitType || null,
     detail: `sdk status=${info.status ?? "-"} type=${info.rateLimitType ?? "-"}`,
@@ -298,6 +330,10 @@ export class LimitWatch {
     this.resetAt = null;
     this.utilization = null;
     this.weeklyUtilization = null;
+    // Per-window state, each updated only by a reading that actually mentions
+    // it. The SDK event covers one window at a time, so merging rather than
+    // replacing is what keeps both halves of the Usage panel populated.
+    this.windows = { fiveHour: null, weekly: null };
     this.usingOverage = false;
     this.limitType = null;
     this.sawCap = false;
@@ -315,6 +351,10 @@ export class LimitWatch {
       resetAt: this.resetAt,
       utilization: this.utilization,
       weeklyUtilization: this.weeklyUtilization,
+      windows: {
+        fiveHour: this.windows.fiveHour ? { ...this.windows.fiveHour } : null,
+        weekly: this.windows.weekly ? { ...this.windows.weekly } : null,
+      },
       usingOverage: this.usingOverage,
       limitType: this.limitType,
       sawCap: this.sawCap,
@@ -343,6 +383,12 @@ export class LimitWatch {
     }
     if (reading.weeklyUtilization !== null && reading.weeklyUtilization !== undefined) {
       this.weeklyUtilization = reading.weeklyUtilization;
+    }
+    for (const name of ["fiveHour", "weekly"]) {
+      const window = reading.windows?.[name];
+      if (window) {
+        this.windows[name] = { ...window, observedAt: this.lastCheckedAt };
+      }
     }
     if (reading.limitType) {
       this.limitType = reading.limitType;

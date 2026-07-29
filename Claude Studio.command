@@ -28,5 +28,4 @@ if [ ! -d node_modules ]; then
   }
 fi
 
-echo "Starting Claude CLI Studio... close this window to stop it."
 npm start
