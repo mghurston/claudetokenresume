@@ -579,8 +579,18 @@ function renderEfforts() {
     : "";
 }
 
+const MODE_KEY = "claude-cli-studio-permission-mode";
+
+/**
+ * The mode is remembered across reloads on purpose.
+ *
+ * It used to reset to Ask every time the tab was reopened, silently — so
+ * "I set it to Autopilot and left" became "it asked me anyway" the moment the
+ * page was refreshed, with nothing on screen to say the choice had been thrown
+ * away.
+ */
 function renderPermissionModes() {
-  const previous = elements.modeSelect.value;
+  const previous = elements.modeSelect.value || localStorage.getItem(MODE_KEY) || "";
   elements.modeSelect.replaceChildren();
   for (const mode of state.bootstrap?.permissionModes || []) {
     const option = document.createElement("option");
@@ -592,6 +602,42 @@ function renderPermissionModes() {
   const modes = (state.bootstrap?.permissionModes || []).map((mode) => mode.id);
   elements.modeSelect.value = modes.includes(previous) ? previous : modes[0] || "default";
   updateComposerNote();
+}
+
+/**
+ * Pushes the chosen mode at the session that is running right now.
+ *
+ * The mode also rides along with every message, which covers the idle case; the
+ * call below is what makes the choice mean anything *during* a turn — including
+ * answering the prompt already on screen, which is exactly when someone reaches
+ * for this dropdown.
+ */
+async function applyPermissionMode() {
+  const permissionMode = elements.modeSelect.value;
+  localStorage.setItem(MODE_KEY, permissionMode);
+  updateComposerNote();
+
+  const sessionId = state.activeSessionId;
+  if (!sessionId || !state.runningSessions.has(sessionId)) {
+    return;
+  }
+  try {
+    const result = await api(`/api/sessions/${sessionId}/permission-mode`, {
+      method: "POST",
+      body: JSON.stringify({ permissionMode }),
+    });
+    if (result.approved > 0) {
+      showToast(
+        result.approved === 1
+          ? `${modeName(permissionMode)} — approved the request that was waiting.`
+          : `${modeName(permissionMode)} — approved ${result.approved} requests that were waiting.`,
+      );
+    } else if (result.applied) {
+      showToast(`${modeName(permissionMode)} applies to this turn now.`);
+    }
+  } catch (error) {
+    showToast(error.message, "error");
+  }
 }
 
 function modeName(modeId) {
@@ -1933,6 +1979,22 @@ function showNextPermission() {
   showPermissionDialog(state.permissionQueue.shift());
 }
 
+/**
+ * Takes down a prompt somebody else answered — another tab, or a switch to a
+ * mode that auto-approves it. Leaving the modal up would strand the user on a
+ * dialog whose buttons can only 404.
+ */
+function dismissPermission(requestId) {
+  state.permissionQueue = state.permissionQueue.filter(
+    (item) => item.requestId !== requestId,
+  );
+  if (state.currentPermission?.requestId === requestId) {
+    elements.permissionDialog.close();
+    state.currentPermission = null;
+  }
+  showNextPermission();
+}
+
 async function resolvePermission(decision) {
   if (!state.currentPermission) return;
   try {
@@ -2095,6 +2157,8 @@ function handleStreamPayload(payload) {
     handleClaudeEvent(payload);
   } else if (payload.type === "permission-request") {
     enqueuePermission(payload);
+  } else if (payload.type === "permission-resolved") {
+    dismissPermission(payload.requestId);
   } else if (payload.type === "sessions-changed") {
     setTimeout(() => refreshBootstrap({ quiet: true }), 300);
   } else if (payload.type === "watch-changed") {
@@ -2201,7 +2265,7 @@ elements.openSidebarButton.addEventListener("click", () =>
 elements.closeSidebarButton.addEventListener("click", closeSidebar);
 elements.sidebarBackdrop.addEventListener("click", closeSidebar);
 elements.sessionSearch.addEventListener("input", renderSidebar);
-elements.modeSelect.addEventListener("change", updateComposerNote);
+elements.modeSelect.addEventListener("change", applyPermissionMode);
 elements.watchButton.addEventListener("click", () => {
   state.queueForReset = !state.queueForReset;
   updateWatchButton();

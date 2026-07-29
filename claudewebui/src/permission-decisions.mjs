@@ -43,6 +43,29 @@ export function canApproveForSession(request) {
   return sessionPermissionUpdates(request) !== null;
 }
 
+/** The tools `acceptEdits` waves through — the CLI's own edit set. */
+const EDIT_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
+
+/**
+ * Would `mode` have let `toolName` run without asking?
+ *
+ * Switching the dropdown to a looser mode has to settle the prompts that are
+ * *already* open, not just the next ones. The SDK asks once per tool call and
+ * never re-asks, so a dialog raised under Ask stays raised after the switch —
+ * and since the whole point of picking Autopilot is that nobody is watching, it
+ * would sit there until the ten-minute timeout denied it. That was the reported
+ * "I put it on autopilot and it still asked me" bug.
+ */
+export function modeAutoApproves(mode, toolName) {
+  if (mode === "bypassPermissions") {
+    return true;
+  }
+  if (mode === "acceptEdits") {
+    return EDIT_TOOLS.has(toolName);
+  }
+  return false;
+}
+
 export function permissionResultFor(decision, request, feedback) {
   if (decision === "reject") {
     return {

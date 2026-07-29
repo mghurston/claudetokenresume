@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   canApproveForSession,
+  modeAutoApproves,
   permissionResultFor,
   sessionPermissionUpdates,
 } from "../src/permission-decisions.mjs";
@@ -85,4 +86,28 @@ test("denying without feedback still gives Claude a reason", () => {
   const result = permissionResultFor("reject", { toolName: "Bash" }, "   ");
   assert.equal(result.behavior, "deny");
   assert.match(result.message, /denied/i);
+});
+
+test("Autopilot answers every prompt already waiting", () => {
+  // Switching to Autopilot has to clear the dialog that is already up. The SDK
+  // asks once and never re-asks, so anything still waiting would otherwise hang
+  // until the ten-minute timeout denied it — with nobody there to notice.
+  for (const toolName of ["Bash", "Write", "WebFetch", "Task"]) {
+    assert.equal(modeAutoApproves("bypassPermissions", toolName), true);
+  }
+});
+
+test("Accept edits answers edit prompts only", () => {
+  assert.equal(modeAutoApproves("acceptEdits", "Write"), true);
+  assert.equal(modeAutoApproves("acceptEdits", "Edit"), true);
+  assert.equal(modeAutoApproves("acceptEdits", "NotebookEdit"), true);
+  assert.equal(modeAutoApproves("acceptEdits", "Bash"), false);
+  assert.equal(modeAutoApproves("acceptEdits", "WebFetch"), false);
+});
+
+test("the asking modes leave waiting prompts alone", () => {
+  for (const mode of ["default", "plan", "dontAsk"]) {
+    assert.equal(modeAutoApproves(mode, "Write"), false);
+    assert.equal(modeAutoApproves(mode, "Bash"), false);
+  }
 });

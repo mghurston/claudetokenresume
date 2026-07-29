@@ -686,6 +686,31 @@ export class ClaudeBridge {
   }
 
   /**
+   * Applies a permission mode to a live session immediately.
+   *
+   * `send()` also syncs the mode, but only when it starts a turn — which is
+   * useless for the case that matters: a prompt appears mid-turn, the user
+   * picks Autopilot to stop being asked, and walks away. Until this existed,
+   * that choice reached the CLI only on the *next* message, so the running turn
+   * kept asking and the user kept not being there to answer.
+   *
+   * Returns false when the session has no live runner (nothing is running, so
+   * the mode the next turn is sent with is the only thing that matters).
+   */
+  async setPermissionMode(sessionId, permissionMode) {
+    const runner = this.runners.get(sessionId);
+    if (!runner || runner.disposed) {
+      return false;
+    }
+    if (runner.permissionMode === permissionMode) {
+      return true;
+    }
+    await runner.query.setPermissionMode(permissionMode);
+    runner.permissionMode = permissionMode;
+    return true;
+  }
+
+  /**
    * Sends one turn. `sessionId` must already be decided by the caller — for a
    * brand-new chat it is a fresh UUID handed to the CLI via the `sessionId`
    * option, which lets Studio show the conversation in the sidebar before

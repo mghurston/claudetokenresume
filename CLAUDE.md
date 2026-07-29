@@ -145,9 +145,41 @@ command queue via `priority` on the pushed `SDKUserMessage`:
   `handleMessage` suppresses it while a `'now'` message is pending, or every
   side question would look like a crash.
 
-Model, effort and permission mode are only applied when nothing is running;
-they take effect immediately, so applying them for a message that has not
-started would silently re-steer the turn already on screen.
+Model and effort are only applied when nothing is running: they take effect
+immediately, so applying them for a message that has not started would silently
+re-steer the turn already on screen.
+
+**Permission mode is the exception — it applies the moment you pick it.** It
+used to follow the same rule, and that made Autopilot look broken: a prompt
+appears mid-turn, you pick Autopilot to stop being asked, and nothing happens,
+because the choice only reached the CLI with the *next* message. The turn kept
+asking, and the whole reason you picked Autopilot is that you had walked away.
+Three prompts in a row then hit the ten-minute timeout, which denies, and the
+run was dead. So `POST /api/sessions/<id>/permission-mode` pushes the mode at
+the live runner via `query.setPermissionMode()`, and the dropdown calls it on
+`change`. Verified live: under `default` the first `Write` prompts, a mid-turn
+switch to `bypassPermissions` lands, and the rest of the turn runs with zero
+further prompts.
+
+Switching also has to answer the prompts **already waiting** — the SDK asks once
+per tool call and never re-asks, so a dialog raised under Ask survives the
+switch and hangs until it times out. `modeAutoApproves` decides which ones the
+new mode would never have raised (`bypassPermissions`: all of them;
+`acceptEdits`: the edit tools) and the server settles those with `allow`, then
+broadcasts `permission-resolved` so every tab takes its modal down.
+
+`canUseTool` is genuinely suppressed by `bypassPermissions` — the SDK even warns
+`CLAUDE_SDK_CAN_USE_TOOL_SHADOWED` when you pass both. So if Studio is prompting
+under Autopilot, the mode never reached the session; that is where to look, not
+at the callback.
+
+The dropdown's value persists in `localStorage`. It used to reset to Ask on
+every reload, silently, which turned "I set Autopilot and left" into "it asked
+me anyway" the moment the tab was reopened.
+
+`scripts/e2e-permission-mode.mjs` covers all of this against a real server and a
+real CLI. It is deliberately outside `test/`, because `node --test` sweeps that
+directory and this one spends real tokens.
 
 A queued message cannot be cancelled: the protocol has `cancel_async_message`
 and `interrupt`'s `cancel_queued`, but the SDK's public `Query` API exposes

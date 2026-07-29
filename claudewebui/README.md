@@ -107,8 +107,16 @@ flip the whole session into a looser permission mode are dropped — it can stop
 Claude asking about *that tool*, never about everything.
 
 Autopilot (`bypassPermissions`) skips prompts entirely, and the composer note
-turns red while it is on. You can switch into or out of it mid-conversation —
-the mode applies from your next message. Use it only in folders you trust.
+turns red while it is on. Use it only in folders you trust.
+
+**Changing the mode takes effect immediately, including in the middle of a
+turn.** Pick Autopilot while Claude is working and the turn stops asking from
+that moment on — and any prompt already on screen is approved for you, so you
+can set it and walk away without leaving a dialog waiting on a click that never
+comes. Your choice is remembered across reloads.
+
+`scripts/e2e-permission-mode.mjs` proves this end to end against a real server
+and a real CLI. It spends real tokens, so it is not part of `npm test`.
 
 `AskUserQuestion` is disabled, so Claude asks follow-up questions as ordinary
 chat messages instead of stalling on a dialog the browser cannot render.

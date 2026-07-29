@@ -25,7 +25,11 @@ import {
   permissionModes,
 } from "./src/model-info.mjs";
 import { LimitWatch } from "./src/limit-watch.mjs";
-import { canApproveForSession, permissionResultFor } from "./src/permission-decisions.mjs";
+import {
+  canApproveForSession,
+  modeAutoApproves,
+  permissionResultFor,
+} from "./src/permission-decisions.mjs";
 import { isWithin, ProjectCatalog, slugifyProjectId } from "./src/project-catalog.mjs";
 import { isSessionId, SessionCatalog } from "./src/session-catalog.mjs";
 import { StateStore } from "./src/state-store.mjs";
@@ -446,9 +450,42 @@ function waitForPermission({ sessionId, request, signal }) {
       },
       canApproveForSession: canApproveForSession(request),
     };
-    pendingPermissions.set(requestId, { settle, payload, request });
+    pendingPermissions.set(requestId, { sessionId, settle, payload, request });
     broadcast(payload);
   });
+}
+
+/**
+ * Settles a prompt and tells every tab to take the dialog down.
+ *
+ * Without the broadcast a second tab — or the tab that raised the dialog before
+ * a mode switch answered it for them — keeps a modal on screen for a request
+ * the server has already forgotten, and clicking it just 404s.
+ */
+function settlePermission(requestId, pending, result) {
+  pending.settle(result);
+  broadcast({ type: "permission-resolved", requestId, sessionId: pending.sessionId });
+}
+
+/**
+ * Answers the prompts a newly chosen mode would never have raised.
+ *
+ * See `modeAutoApproves` — the SDK asks once and never re-asks, so anything
+ * already waiting has to be resolved here or it hangs until it times out.
+ */
+function applyModeToPendingPermissions(sessionId, permissionMode) {
+  let approved = 0;
+  for (const [requestId, pending] of pendingPermissions) {
+    if (pending.sessionId !== sessionId) {
+      continue;
+    }
+    if (!modeAutoApproves(permissionMode, pending.request.toolName)) {
+      continue;
+    }
+    settlePermission(requestId, pending, { behavior: "allow" });
+    approved += 1;
+  }
+  return approved;
 }
 
 const claude = new ClaudeBridge({
@@ -774,7 +811,9 @@ function projectById(projects, projectId) {
 }
 
 function parseSessionPath(pathname) {
-  const match = pathname.match(/^\/api\/sessions\/([^/]+)(?:\/(abort|organize))?$/i);
+  const match = pathname.match(
+    /^\/api\/sessions\/([^/]+)(?:\/(abort|organize|permission-mode))?$/i,
+  );
   if (!match || !isSessionId(match[1])) {
     return null;
   }
@@ -985,6 +1024,29 @@ async function handleApi(request, response, url) {
     return true;
   }
 
+  // The permission dropdown, applied to the session that is running *now*.
+  // Deferring this to the next message is what made Autopilot look broken.
+  if (request.method === "POST" && sessionPath?.action === "permission-mode") {
+    const body = await readJson(request);
+    const permissionMode = String(body.permissionMode || "");
+    if (!isKnownPermissionMode(permissionMode)) {
+      json(response, 400, { error: "Choose a valid permission mode." });
+      return true;
+    }
+    let applied = false;
+    try {
+      applied = await claude.setPermissionMode(sessionPath.sessionId, permissionMode);
+    } catch (error) {
+      json(response, 409, {
+        error: `Claude Code would not switch to that mode: ${error.message}`,
+      });
+      return true;
+    }
+    const approved = applyModeToPendingPermissions(sessionPath.sessionId, permissionMode);
+    json(response, 200, { ok: true, applied, approved });
+    return true;
+  }
+
   if (request.method === "POST" && sessionPath?.action === "organize") {
     const body = await readJson(request);
     const projects = await catalog();
@@ -1165,7 +1227,7 @@ async function handleApi(request, response, url) {
       json(response, 400, { error: "Choose a valid permission decision." });
       return true;
     }
-    pending.settle(result);
+    settlePermission(permissionMatch[1], pending, result);
     json(response, 200, { ok: true });
     return true;
   }
